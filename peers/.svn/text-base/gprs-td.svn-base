@@ -1,0 +1,38 @@
+# TTYS* 根据硬件配置
+/dev/ttyS3
+115200
+
+defaultroute # use this interface for the default route
+usepeerdns # use their DNS
+nodetach # keep pppd in the foreground
+nocrtscts # hardware flow control
+lock # lock the serial port
+noauth # don't expect authentication from the modem
+local # don't use CD or DTR
+debug # blah blah blah to STDERR
+
+default-mru#Disable MRU [Maximum Receive Unit] negotiation. With this option, pppd will use the default MRU value of 1500 bytes for both the transmit and receive direction
+#mru n 
+#把MRU[MaximumReceiveUnit最大接收单元]的值设为 n来进行协商。pppd将会要求彼端传送不比位元组 更长的封包。最小的MRU值是128。预设的MRU值则是 1500。对於慢速线路上的建议值是296（其中40个位元 组给TCP/IP表头+256个位元组的资料）。 
+ #(Note that for IPv6 MRU must be at least 1280) 
+#mtu n 
+# 将MTU[MaximumTransmitUnit最大传输单元]的值设 为n。除非彼端经由MRU协商要求一个更小的值，pppd 将会要求核心网路程式码透过PPP网路界面所传送的资料 封包不超过n个位元组。 
+# (Note that for IPv6 MTU must be at least 1280) 
+
+#persist # keep re-connecting when dropped
+
+# this section's not necessary at all, but here it is anyway.
+#remotename ' '
+user foo
+#password ' '
+#show-password
+
+lcp-echo-interval 0 # don't bother with echo requests, since
+# t-mobile doesn't effing bother sending them back!
+lcp-echo-failure 0
+lcp-restart 1 # one-second resend
+
+#connect '/usr/sbin/chat -v -f /etc/ppp/peers/chat-gc85'
+#disconnect '/usr/sbin/chat -v -f /etc/ppp/peers/chat-gc85-disconnect'
+connect /etc/ppp/peers/gprs-connect
+disconnect  /etc/ppp/peers/gprs-disconnect

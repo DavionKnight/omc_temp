@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html>
+<meta charset="UTF-8">
+<title>欢迎访问RAS系统</title> </title>
+<link rel="stylesheet" type="text/css" href="easyui.css">
+<script type="text/javascript" src="jquery-1.9.1.js"></script>
+<script type="text/javascript" src="jquery.easyui.min.js"></script>
+
+<script>
+var g_dev_cnt = 0;
+var g_enable_cnt = 0;
+var g_state_cnt = 0;
+var g_set_cnt = 0;
+var g_performance_cnt = 0;
+var g_add_cnt = 0;
+var g_custom_cnt = 0;
+function getLength(str){
+	var len = str.length;
+	var reLen = 0;
+	for(var i = 0; i < len; i++){
+		var tmp = str.charCodeAt(i);
+		if(tmp < 27 || tmp > 126){
+			reLen += 2;
+		}else{
+			reLen++;
+		}
+	}
+	return reLen;
+}
+// 显示参量列表
+function display_para()
+{
+    var num;
+    var tab_tmp;
+    var str = "";
+	$("#dis_id").click(function(){
+		$.messager.confirm('警告信息', '删除当前参量表，并重新获取？', function(r){  
+        if (r){       
+			g_dev_cnt = 0;
+			g_enable_cnt = 0;
+			g_state_cnt = 0;
+			g_set_cnt = 0;
+			g_performance_cnt = 0;
+			g_add_cnt = 0;
+			g_custom_cnt = 0;
+            $("#dev_para").empty();
+            $("#alarm_enable").empty();
+            $("#alarm_state").empty();
+            $("#set_para").empty();
+            $("#performance_para").empty();
+            $("#add_para").empty();
+            $("#custom_para").empty();
+            str = "cmd=para_list&nodata";
+			$.post("cgi-bin/dru.cgi",
+			str,
+			function(data,status){
+				//alert("数据：" + data + "\n状态：" + status);
+				if(status == "success"){
+					var ss = data.split("&");
+					var sm = ss[0].split("=");
+					if((sm[0] == "cmd")&&(sm[1] == "para_list")){
+            
+						for(var i = 1; i < ss.length; i++){
+							var st = ss[i].split("=");
+							num = parseInt(st[0],16);
+							if((num <= 0x024)||((num >= 0x601)&&(num<= 0x607)) || ((num >= 0x101)&&(num<= 0x166))){
+								tab_tmp = "dev_para";
+								g_dev_cnt += 1;
+								g_dev_cnt &= 1;
+								tmp = g_dev_cnt;
+							}else if(((num >= 0x200)&&(num <= 0x0300))||((num >= 0x30)&&(num<= 0x49))){
+								tab_tmp = "alarm_enable";
+								g_enable_cnt += 1;
+								g_enable_cnt &= 1;
+								tmp = g_enable_cnt;
+							}else if(((num >= 0x301)&&(num <= 0x0400))||((num >= 0x5c)&&(num<= 0x75))){
+								tab_tmp = "alarm_state";
+								g_state_cnt += 1;
+								g_state_cnt &= 1;
+								tmp = g_state_cnt;
+							}else if(((num >= 0x400)&&(num <= 0x0460))||((num >= 0x860)&&(num<= 0x872)) 
+                                        ||((num >= 0x172)&&(num<= 0x185) ||((num >= 0x608)&&(num<= 0x613)) ) ){
+								tab_tmp = "set_para";
+								g_set_cnt += 1;
+								g_set_cnt &= 1;
+								tmp = g_set_cnt;
+							}else if(((num >= 0x50e)&&(num <= 0x050f))||((num >= 0x873)&&(num<= 0x87c))){
+								tab_tmp = "performance_para";
+								g_performance_cnt += 1;
+								g_performance_cnt &= 1;
+								tmp = g_performance_cnt;
+							}else if((num >= 0x08000000)&&(num <= 0x08000fff)){
+								tab_tmp = "add_para";
+								g_add_cnt += 1;
+								g_add_cnt &= 1;
+								tmp = g_add_cnt;
+							}else{
+								tab_tmp = "custom_para";
+								g_custom_cnt += 1;
+								g_custom_cnt &= 1;
+								tmp = g_custom_cnt;
+							}
+							var type_coef = st[1].split(",");
+							$("#"+tab_tmp).append("<b><input type='checkbox' id='cb_"+st[0]+"'></b>");
+                            $("#"+tab_tmp).append("<b><label style='width:250px; display:inline-block;'>"+type_coef[0]+"</label></b>");
+							$("#"+tab_tmp).append("<b>：<input class='c_para' type='text' id='"+st[0]+"' var_type='"+type_coef[1]+"' coefficient='"+type_coef[2]+"'></b>");
+                            if(tmp == 0){
+								$("#"+tab_tmp).append("<br/>");
+							}else{
+								$("#"+tab_tmp).append("<b>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</b>");
+							}
+						} 
+						alert("查询参量列表返回!");
+					}
+				}
+			});
+		}
+	});              
+});
+}
+// 查询全部
+function read_para(){
+	var str="";
+	$("#read_id").click(function(){
+		str="";
+		str += "cmd=read&nodata";
+		//$(":text").each(function(){
+		//	str += "&";
+		//	str += $(this).attr("id");
+		//	str += "=?";
+		//});
+		$.post("cgi-bin/dru.cgi",
+		str,
+		function(data,status){
+			//alert("数据：" + data + "\n状态：" + status);
+			if(status == "success"){
+				var ss = data.split("&");	
+				var sm = ss[0].split("=");
+				if((sm[0] == "cmd")&&(sm[1] == "read")){
+					for(var i = 1; i < ss.length; i++){
+						var st = ss[i].split("=");
+						var coeff = document.getElementById(st[0]).getAttribute("coefficient");
+						var var_type = document.getElementById(st[0]).getAttribute("var_type");
+						var type = var_type.indexOf("uint");
+						if(type != -1){
+							$("#"+st[0]).val(parseFloat(st[1])/parseFloat(coeff));	
+						}else if(var_type.indexOf("sint1") != -1){
+							var tmp = parseInt(st[1]);
+							if(tmp > 0x7f){
+								tmp = 256-tmp;
+								tmp = 0-tmp;
+							}
+							$("#"+st[0]).val(tmp/parseFloat(coeff));	
+						}else if(var_type.indexOf("sint2") != -1){
+							var tmp = parseInt(st[1]);
+							if(tmp > 0x7fff){
+								tmp = 0xffff+1-tmp;
+								tmp = 0-tmp;
+							}
+							$("#"+st[0]).val(tmp/parseFloat(coeff));		
+						}else if(var_type.indexOf("sint4") != -1){
+							var tmp = parseInt(st[1]);
+							if(tmp > 0x7fffffff){
+								tmp = 0xffffffff+1-tmp;
+								tmp = 0-tmp;
+							}
+							$("#"+st[0]).val(tmp/parseFloat(coeff));		
+						}else{
+							$("#"+st[0]).val(st[1]);	
+						}
+					}
+				} 
+                
+			}
+			alert("查询全部返回!");
+		});
+	});
+}
+// 设置参数
+function set_para(){
+    var str="";
+	var value;
+	var tmp;
+	$("#set_id").click(function(){
+    
+		str = "";
+		str += "cmd=write";
+		$(":checked").each(function(){
+			str += "&";
+			var st = $(this).attr("id").split("_");
+			str += st[1];
+			str += "=";
+			value = $("#"+st[1]).val();
+			var coeff = document.getElementById(st[1]).getAttribute("coefficient");
+			var var_type = document.getElementById(st[1]).getAttribute("var_type");
+			var type = var_type.indexOf("uint");
+			if(type != -1){
+				tmp = parseFloat(value)*parseFloat(coeff);
+			}else if(var_type.indexOf("sint1") != -1){
+				tmp = parseFloat(value);
+                tmp = tmp*parseFloat(coeff);
+				if(tmp < 0){
+					tmp = 0-tmp;
+					tmp = 0xff+1-tmp;
+				}				
+			}else if(var_type.indexOf("sint2") != -1){
+				tmp = parseFloat(value);
+                tmp = tmp*parseFloat(coeff);
+				if(tmp < 0){
+					tmp = 0-tmp;
+					tmp = 0xffff+1-tmp;
+				}				
+			}else if(var_type.indexOf("sint4") != -1){
+				tmp = parseFloat(value);
+                tmp = tmp*parseFloat(coeff);
+				if(tmp < 0){
+					tmp = 0-tmp;
+					tmp = 0xffffffff+1-tmp;
+				}				
+			}else{
+				tmp = value;
+			} 
+			str += tmp;
+		});
+		$.post("cgi-bin/dru.cgi",
+		str,
+		function(data,status){
+			//alert("数据：" + data + "\n状态：" + status);
+			if(status == "success"){
+				alert("设置参数返回!");
+			}
+		});  
+        
+	});
+}
+// 取消全部
+function cancel_cb(){
+	$("#cancel_id").click(function(){
+		$(":checked").removeAttr("checked");
+	});
+}
+// 全部清空
+function clr_text(){
+	$("#clr_id").click(function(){
+        $.messager.confirm('警告信息', '是否清空全部数据？', function(r){  
+        if (r){
+		  $(":text").each(function(){
+			 $(this).val("");
+		  });
+        }
+        });
+	});
+}
+$(document).ready(function(){
+	// 刷新参量列表
+	display_para();
+	// 查询全部
+	read_para();
+	// 设置参数
+	set_para();
+	// 取消全部
+	cancel_cb();
+	// 全部清空
+	clr_text();
+});
+</script>
+</head>
+<body style="font-family:'宋体';">
+<img src="logo.gif">欢迎访问RAS系统 v2.1
+<br>
+<br>
+<a id="dis_id" class="easyui-linkbutton">刷新参量列表</a>
+<a id="read_id" class="easyui-linkbutton">查询全部</a>
+<a id="set_id" class="easyui-linkbutton">设置参数</a>
+<a id="cancel_id" class="easyui-linkbutton">取消全部</a>
+<a id="clr_id" class="easyui-linkbutton">全部清空</a>
+<div style="margin:10px 0;"></div>
+<div class="easyui-tabs" data-options="tools:'#tab-tools'"  style="width:1000px;height:450px" id="tabs">
+	<div title="主板" style="padding:10px;">
+        <div class="easyui-tabs" data-options="fit:true,plain:true">
+            <div title="设备参数" id="dev_para" style="padding:10px">
+        	</div>
+            <div title="告警使能" id="alarm_enable" style="padding:10px">
+        	</div>
+        	<div title="告警状态" id="alarm_state" style="padding:10px">
+        	</div>
+            <div title="设置参数" id="set_para" style="padding:10px">
+        	</div>
+            <div title="性能参数" id="performance_para" style="padding:10px">
+        	</div>
+            <div title="扩展CPID参数" id="add_para" style="padding:10px">
+        	</div>
+            <div title="按制式区分参数" id="custom_para" style="padding:10px">
+        	</div>
+        </div>
+    </div>
+    <div title="模块" style="padding:10px;">
+        <div class="easyui-tabs" data-options="fit:true,plain:true">
+            <div title="设备参数" id="dev_mod" style="padding:10px">
+        	</div>
+            <div title="告警使能" id="alarm_enable_mod" style="padding:10px">
+        	</div>
+        	<div title="告警状态" id="alarm_state_mod" style="padding:10px">
+        	</div>
+            <div title="设置参数" id="set_mod" style="padding:10px">
+        	</div>
+            <div title="性能参数" id="performance_mod" style="padding:10px">
+        	</div>
+            <div title="补充参数" id="add_mod" style="padding:10px">
+        	</div>
+            <div title="自定义参数" id="custom_mod" style="padding:10px">
+        	</div>
+        </div>
+    </div>
+</div>
+</body>
+</html>

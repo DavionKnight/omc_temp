@@ -1,0 +1,914 @@
+/********************  COPYRIGHT(C) 2007 ***************************************
+**                               北京汉铭信通科技有限公司
+**                                     无线产品研发部
+**
+**                                 http:// www.aceway.com.cn
+**--------------文件信息--------------------------------------------------------
+**文   件   名: mcpb_protocol.c
+**创   建   人: 于宏图
+**创 建  日 期: 2014年4月24日
+**程序开发环境:linux
+**描        述: MCP_B协议处理
+**--------------历史版本信息----------------------------------------------------
+** 创建人:
+** 版  本:
+** 日　期:
+** 描　述:
+**--------------当前版本修订----------------------------------------------------
+** 修改人:
+** 版  本:
+** 日　期:
+** 描　述:
+**------------------------------------------------------------------------------
+**
+*******************************************************************************/
+#include "../sqlite/drudatabase.h"
+#include "approtocol.h"
+#include "mcpb_protocol.h"
+
+extern int DbSaveThisIntPara(unsigned int objectid, int val);
+extern int g_MCPFlag;
+extern DevicePara_t g_DevicePara;
+
+MCPBPara_t SWUpdateData; //软件升级过程参数定义
+
+time_t g_UpdateStartTime, g_UpdateOverTime; //更新软件过程定时
+extern const int CCITT_CRC16Table[256];
+
+/*******************************************************************************
+*函数名称 : void PreSoftBackup(void)
+*功    能 : 当前软件备份
+*输入参数 : None
+*输出参数 : None
+*******************************************************************************/
+void PreSoftBackup(void)
+{
+char syscmd[200];
+
+	memset(syscmd, 0, sizeof(syscmd));
+	sprintf(syscmd, "mkdir %s", SOFT_BAKDIR);//建立备份文件夹
+	DEBUGOUT(syscmd);
+	DEBUGOUT("..............................................\r\n");
+	system(syscmd);
+	sprintf(syscmd, "cp -r %s/%s %s", SOFT_UPDATEDIR, DEV_VERSION, SOFT_BAKDIR);//老文件备份
+	DEBUGOUT(syscmd);
+	DEBUGOUT("..............................................\r\n");
+  system(syscmd);
+  sprintf(syscmd, "cp -r %s %s/%s", SOFT_UPDATETMP, SOFT_UPDATEDIR, DEV_VERSION);//用新文件
+	DEBUGOUT(syscmd);
+	DEBUGOUT("..............................................\r\n");
+  system(syscmd);
+}
+
+/*******************************************************************************
+*函数名称 : void TurnToUpdateMode(APPack_t *p_packbuf)
+*功    能 : 设备的监控软件从监控模式转换到软件升级模式,监控控制层协议由MAP_A APC协议转换为MAP_B APC协议
+*输入参数 : APPack_t *p_packbuf:通讯数据包数据结构指针
+*输出参数 : None
+*******************************************************************************/
+void TurnToUpdateMode(APPack_t *p_packbuf)
+{
+	//以下各项参数在回复时不变,起始、结束标志,AP层协议类型,VP:A承载协议类型,站点编号,设备编号,通讯包标识号不变,MCP层协议标识
+	//StartFlag, EndFlag, APType, VPType, StationNo, DeviceNo, PackNo, MCPFlag
+	DEBUGOUT("TurnToUpdateMode ...............\n");
+	//以下非数据单元各项根据协议进行修改
+	p_packbuf->VPInteractFlag = VP_INTERACT_NORMAL;	//通讯请求执行正常,VP层交互标志,0x00
+	p_packbuf->CommandFlag = COMMAND_SW_UPDATE_MOD; //命令标识,转换到软件升级模式
+	p_packbuf->ResponseFlag = RESPONSE_SUCCESS;			// 应答标志:成功
+
+	//升级模式数据
+	LoadUpdatePara();//设备监控软件运行模式,升级时下一个文件数据块序号
+	g_UpdateOverTime = time(NULL);//远程通信超时定时
+	g_UpdateStartTime = time(NULL);//更新软件过程定时
+	if(SWUpdateData.SWRunMode == SW_UPDATE_MODE)//断点续传
+	{
+		SWUpdateData.SWRunMode = SW_UPDATE_MODE;
+	}
+	else//新的软件更新
+	{
+		SWUpdateData.SWRunMode = SW_UPDATE_MODE;
+		SWUpdateData.NextFilePackId = 0;
+		SWUpdateData.UpdateFileLen = 0;//更新软件的长度
+	}
+	//升级模式下,控制参数定义
+	SWUpdateData.UpdatePackLen = UPDATEBLOCK_LEN;//0x0203 数据块长度
+	SWUpdateData.TranSoftFileFlag = 1;//0x0302文件传输控制
+	SWUpdateData.SWUpdateResponseFlag = 0;//0x0303	文件数据包应答
+	SWUpdateData.UpdateFilePackId = 0;//0x0304	文件数据块序号
+	SWUpdateData.UpdateNotificationFlag = 2;//预设为有数据上报,等待更新结果后上报,标志,0:无上报,1:已经上报:2:有上报数据
+	SaveUpdatePara();//存储开始升级前所有参数
+
+	g_MCPFlag = MCP_B;
+	//假设升级过程中设备出现重启等故障无法完成升级,正常升级后此数据会按实际情况修改
+	g_DevicePara.SWUpdateResult = 17;//17:表示其它异常中断软件升级
+	DbSaveThisIntPara(SWUPDATERESULT_ID, g_DevicePara.SWUpdateResult);
+	g_DevicePara.SWRunMode = SW_UPDATE_MODE;//0x0010(MCP_A)切换到升级模式
+	DbSaveThisIntPara(SWRUNMODE_ID, g_DevicePara.SWRunMode);
+}
+
+/*******************************************************************************
+*函数名称 : void SWVerisonSwitch(APPack_t *p_packbuf)
+*功    能 : 切换监控软件版本
+*输入参数 : APPack_t *p_packbuf:通讯数据包数据结构指针
+*输出参数 : None
+*******************************************************************************/
+void SWVerisonSwitch(APPack_t *p_packbuf)
+{
+	char syscmd[200];
+	FILE *fp = NULL;
+
+	//以下各项参数在回复时不变,起始、结束标志,AP层协议类型,VP:A承载协议类型,站点编号,设备编号,通讯包标识号不变,MCP层协议标识
+	//StartFlag, EndFlag, APType, VPType, StationNo, DeviceNo, PackNo, MCPFlag
+	DEBUGOUT("TurnToUpdateMode ...............\n");
+	//以下非数据单元各项根据协议进行修改
+	p_packbuf->VPInteractFlag = VP_INTERACT_NORMAL;		//通讯请求执行正常,VP层交互标志,0x00
+	p_packbuf->CommandFlag = COMMAND_SWVERISONSWITCH; 	//命令标识,转换到软件升级模式
+
+	memset(syscmd, 0, sizeof(syscmd));
+	sprintf(syscmd, "%s/%s", SOFT_BAKDIR, DEV_VERSION);	//老文件备份
+	fp = fopen(syscmd, "r");
+	if (fp == NULL)//没有备份版本,切换
+	{
+		p_packbuf->ResponseFlag = RESPONSE_SWVERISONSWITCH_ERR;			// 应答标志:成功
+	}
+	else
+	{
+		p_packbuf->ResponseFlag = RESPONSE_SUCCESS;			// 应答标志:成功
+		fclose(fp);
+		memset(syscmd, 0, sizeof(syscmd));
+		sprintf(syscmd, "cp -r %s/%s /tmp", SOFT_UPDATEDIR, DEV_VERSION);//文件备份
+	  	system(syscmd);
+	  
+	  	memset(syscmd, 0, sizeof(syscmd));
+	  	sprintf(syscmd, "cp -r %s/%s %s/%s", SOFT_BAKDIR, DEV_VERSION, SOFT_UPDATEDIR, DEV_VERSION);
+	  	system(syscmd);
+	  
+	  	memset(syscmd, 0, sizeof(syscmd));
+	  	sprintf(syscmd, "cp -r /tmp/%s %s/%s", DEV_VERSION, SOFT_BAKDIR, DEV_VERSION);
+	  	system(syscmd);	  
+	}
+	g_MCPFlag = SW_VERISONSWITCH_MODE;
+}
+
+/*******************************************************************************
+*函数名称 : int	MCP_B_QueryCommand(APPack_t *p_packbuf)
+*功    能 : 监控控制层协议MAP_B APC协议软件升级查询控制函数
+*输入参数 : APPack_t *p_packbuf:通讯数据包数据结构指针
+*输出参数 : 查询数据正确数据包长度,错误返回-1
+*******************************************************************************/
+int	MCP_B_QueryCommand(APPack_t *p_packbuf)
+{
+int objectlen, objectid, pdustart, result, i, j;
+DevInfo_t devinfo;
+
+	//g_UpdateStartTime = time(NULL);//更新软件过程定时
+  //以下各项参数在回复时不变,起始、结束标志,AP层协议类型,VP:A承载协议类型,站点编号,设备编号,通讯包标识号不变,MCP层协议标识
+  //StartFlag, EndFlag, APType, VPType, StationNo, DeviceNo, PackNo, MCPFlag
+  //以下非数据单元各项根据协议进行修改
+  p_packbuf->VPInteractFlag = VP_INTERACT_NORMAL;// 通讯请求执行正常,VP层交互标志,0x00
+  p_packbuf->CommandFlag = COMMAND_QUERY;// 命令标识:查询
+  p_packbuf->ResponseFlag = RESPONSE_SUCCESS;// 应答标志:成功
+
+	g_UpdateOverTime = time(NULL);//远程通信超时定时
+  pdustart = GetDevInfo(&devinfo, p_packbuf);
+
+	//正常参数查询
+  result = 0;
+  //数据单元根据协议数据ID号进行修改
+  for (i = 0; i < (p_packbuf->PackLen - AP_MSG_HEAD_TAIL_LEN); )//AP_MSG_HEAD_TAIL_LEN:17,数据包控制协议字节数(除数据单元外所有数据)
+  {
+		if (p_packbuf->PackValue[i] == 0)//数据长度错误
+	  {
+	  	DEBUGOUT("MCP_B QueryCommand:PackValue Len Error...");
+	  	goto MCP_B_QUERYFAILURE;
+	  }
+    //MCP_B协议数据长度2字节,标识2字节,总计-4字节
+    objectlen = p_packbuf->PackValue[i]+(p_packbuf->PackValue[i+1] * 0x100) - 4;
+    // 数据单元数据标识,ID
+    objectid = p_packbuf->PackValue[i+2]+(p_packbuf->PackValue[i+3] * 0x100);
+		switch(objectid)
+    {
+      case  0x0201://设备监控软件运行模式
+        p_packbuf->PackValue[i+4] = SWUpdateData.SWRunMode;//升级模式
+        result = 1;
+      break;
+      case  0x0202://下一个文件数据块序号
+        p_packbuf->PackValue[i+4] = (INT8U)(SWUpdateData.NextFilePackId & 0xFF);
+        p_packbuf->PackValue[i+5] = (INT8U)((SWUpdateData.NextFilePackId >> 8) & 0xFF);
+        p_packbuf->PackValue[i+6] = (INT8U)((SWUpdateData.NextFilePackId >> 16) & 0xFF);
+        p_packbuf->PackValue[i+7] = (INT8U)((SWUpdateData.NextFilePackId >> 24) & 0xFF);
+        result = 1;
+      break;
+      case  0x0203://数据块长度
+        p_packbuf->PackValue[i+4] = (INT8U)(SWUpdateData.UpdatePackLen & 0xFF);
+        p_packbuf->PackValue[i+5] = (INT8U)((SWUpdateData.UpdatePackLen >> 8) & 0xFF);
+        result = 1;
+      break;
+      case  0x0301://文件标识码,判断是否是有效的数据包
+        for(j = 0; j < 20; j++)
+        {
+          p_packbuf->PackValue[i+j+4] = SWUpdateData.SWUpdateFileID[j];
+        }
+        result = 1;
+      break;
+      case  0x0302://文件传输控制
+        p_packbuf->PackValue[i+4] = SWUpdateData.TranSoftFileFlag;
+        result = 1;
+      break;
+      case  0x0303://文件数据包应答
+        p_packbuf->PackValue[i+4] = SWUpdateData.SWUpdateResponseFlag;//表示成功接收,可以继续接收后续数据包
+        result = 1;
+      break;
+      case  0x0304://文件数据块序号
+        p_packbuf->PackValue[i+4] = (INT8U)(SWUpdateData.UpdateFilePackId & 0xFF);
+        p_packbuf->PackValue[i+5] = (INT8U)((SWUpdateData.UpdateFilePackId >> 8) & 0xFF);
+        p_packbuf->PackValue[i+6] = (INT8U)((SWUpdateData.UpdateFilePackId >> 16) & 0xFF);
+        p_packbuf->PackValue[i+7] = (INT8U)((SWUpdateData.UpdateFilePackId >> 24) & 0xFF);
+        result = 1;
+      break;
+      case  0x0305://升级文件数据
+//        Flash_Address = UPDATEFILE_STARTADDR+SWUpdateData.UpdateFilePackId*SWUpdateData.UpdatePackLen;
+//        for(j = 0; j < SWUpdateData.UpdatePackLen; j++)
+//        {
+//          p_packbuf->PackValue[i+j+4] = F29040ByteRead(Flash_Address);
+//        }
+        result = 1;
+      break;
+    }
+    i = i+4+objectlen;//数据长度+ID+数据
+  }
+  if (result == 1)//查询数据成功
+  {
+    return  p_packbuf->PackLen;
+  }
+  else
+  {
+MCP_B_QUERYFAILURE:
+    DEBUGOUT("MCP_B Query Command Failure!\r\n");
+    ClearAPPackBuf(p_packbuf);
+    return -1;
+  }
+}
+
+/*******************************************************************************
+*函数名称 : void SaveUpdatePara(void)
+*功    能 : 监控控制层协议MAP_B APC协议软件升级控制数据存储函数
+*输入参数 : None
+*输出参数 : None
+*******************************************************************************/
+void SaveUpdatePara(void)
+{
+char syscmd[200];
+FILE *fp = NULL;
+
+	sprintf(syscmd, "%s", SOFT_UPDATEPARA);
+	fp = fopen(syscmd, "w");
+	//0x0201设备监控软件运行模式,uint1型 0:监控模式,1:软件升级模式,其它值为系统保留
+	memset(syscmd, 0, sizeof(syscmd));
+	sprintf(syscmd, "SWRunMode:%d\r\n", SWUpdateData.SWRunMode);
+  fwrite(syscmd, 1, strlen(syscmd), fp);
+  //0x0202 下一个文件数据块序号	uint4型
+	memset(syscmd, 0, sizeof(syscmd));
+	sprintf(syscmd, "NextFilePackId:%d\r\n", SWUpdateData.NextFilePackId);
+  fwrite(syscmd, 1, strlen(syscmd), fp);
+  //0x0203  数据块长度	uint2型,单位为Byte
+	memset(syscmd, 0, sizeof(syscmd));
+	sprintf(syscmd, "UpdatePackLen:%d\r\n", SWUpdateData.UpdatePackLen);
+  fwrite(syscmd, 1, strlen(syscmd), fp);
+  //更新软件的长度(自定义)
+	memset(syscmd, 0, sizeof(syscmd));
+	sprintf(syscmd, "UpdateFileLen:%d\r\n", SWUpdateData.UpdateFileLen);
+  fwrite(syscmd, 1, strlen(syscmd), fp);
+  //0x0301 文件标识码,数字串,最大长度20个字节用16位CRC算法
+  //与AP层校验单元使用相同的算法产生.传输时,放在数字串的最前两个字节,并且第1个字节放CRC结果的低8bit
+	memset(syscmd, 0, sizeof(syscmd));
+	sprintf(syscmd, "SWUpdateFileID:%.20s\r\n", SWUpdateData.SWUpdateFileID);
+  fwrite(syscmd, 1, strlen(syscmd), fp);
+  //0x0302 文件传输控制 uint1型1:表示文件传输开始,
+	memset(syscmd, 0, sizeof(syscmd));
+	sprintf(syscmd, "TranSoftFileFlag:%d\r\n", SWUpdateData.TranSoftFileFlag);
+  fwrite(syscmd, 1, strlen(syscmd), fp);
+  //0x0303文件数据包应答;2:表示文件传输结束,3:表示OMC取消软件升级,4:表示软件升级正常结束
+	memset(syscmd, 0, sizeof(syscmd));
+	sprintf(syscmd, "SWUpdateResponseFlag:%d\r\n", SWUpdateData.SWUpdateResponseFlag);
+  //0x0304	文件数据块序号	uint4型,该序号从0开始顺序进行编号
+	memset(syscmd, 0, sizeof(syscmd));
+	sprintf(syscmd, "UpdateFilePackId:%d\r\n", SWUpdateData.UpdateFilePackId);
+  fwrite(syscmd, 1, strlen(syscmd), fp);
+  //0x0305	(此处为数据地址)文件数据块 数字串,长度仅受通信包的最大长度限制
+	memset(syscmd, 0, sizeof(syscmd));
+	sprintf(syscmd, "UpdateFilePackAddr:%d\r\n", SWUpdateData.UpdateFilePackAddr);
+  fwrite(syscmd, 1, strlen(syscmd), fp);
+	fclose(fp);
+}
+
+/*******************************************************************************
+*函数名称 : int LoadUpdatePara(void)
+*功    能 : 监控控制层协议MAP_B APC协议软件升级控制数据读取函数
+*输入参数 : None
+*输出参数 : 错误返回-1
+*******************************************************************************/
+int LoadUpdatePara(void)
+{
+char *pbuf, buf[200];
+INT32U i;
+FILE  *fp = NULL;
+
+	printf("LoadUpdatePara ...\n");
+  //判断相关拨号文件是否存在
+	memset(buf, 0, sizeof(buf));
+	sprintf(buf, "mkdir %s", SOFT_UPDATEDIR);//建立升级文件夹
+	DEBUGOUT(buf);
+	system(buf);
+	
+  sprintf(buf, "%s", SOFT_UPDATEPARA);
+  if (access(buf, F_OK) != 0)
+  {
+  	//文件不存在
+		SWUpdateData.SWRunMode = SW_MONITOR_MODE;  		//0x0010,0x0201 设备监控软件运行模式 uint1型 0:监控模式,1:软件升级模式,其它值为系统保留
+		SWUpdateData.NextFilePackId = 0;         			//0x0202 下一个文件数据块序号	uint4型
+		SWUpdateData.UpdatePackLen = UPDATEBLOCK_LEN;	//0x0203  数据块长度	uint2型,单位为Byte
+		SWUpdateData.UpdateFileLen = 0;          			//更新软件的长度(自定义)
+		//(与AP层校验单元使用相同的算法)产生.传输时,放在数字串的最前两个字节,并且第1个字节放CRC结果的低8bit.
+		memset(SWUpdateData.SWUpdateFileID, 0, sizeof(SWUpdateData.SWUpdateFileID));//0x0301 文件标识码,数字串,最大长度20个字节用16位CRC算法
+		SWUpdateData.TranSoftFileFlag = 1;       	//0x0302 文件传输控制 uint1型1:表示文件传输开始,2:表示文件传输结束,3:表示OMC取消软件升级,4:表示软件升级正常结束
+		SWUpdateData.SWUpdateResponseFlag = 0; 		//0x0303	文件数据包应答
+		SWUpdateData.UpdateFilePackId = 0;       	//0x0304	文件数据块序号	uint4型,该序号从0开始顺序进行编号
+		SWUpdateData.UpdateFilePackAddr = 0;     	//0x0305	(此处为数据地址)文件数据块 数字串,长度仅受通信包的最大长度限制
+		SWUpdateData.UpdateNotificationFlag = 2; 	//软件更新结果上报标志,1:已经上报,0:未上报
+		SaveUpdatePara();//存储默认参数
+  }
+	fp = fopen(SOFT_UPDATEPARA, "r");
+  if (fp == NULL) return -1;
+  while(!feof(fp))
+  {
+    memset(buf, 0, sizeof(buf));
+    fgets(buf, sizeof(buf), fp);//逐行读取文件
+
+    pbuf = strstr(buf, "SWRunMode:");
+    if (pbuf != NULL)
+    {
+    	pbuf = strchr(buf, ':');
+    	SWUpdateData.SWRunMode = atoi(pbuf+1);//数据
+    }
+    pbuf = strstr(buf, "NextFilePackId:");
+    if (pbuf != NULL)
+    {
+    	pbuf = strchr(buf, ':');
+    	SWUpdateData.NextFilePackId = atoi(pbuf+1);//数据
+    }
+    pbuf = strstr(buf, "UpdatePackLen:");
+    if (pbuf != NULL)
+    {
+    	pbuf = strchr(buf, ':');
+    	SWUpdateData.UpdatePackLen = atoi(pbuf+1);//数据
+    }
+    pbuf = strstr(buf, "UpdateFileLen:");
+    if (pbuf != NULL)
+    {
+    	pbuf = strchr(buf, ':');
+    	SWUpdateData.UpdateFileLen = atoi(pbuf+1);//数据
+    }
+    pbuf = strstr(buf, "SWUpdateFileID:");
+    if (pbuf != NULL)
+    {
+    	pbuf = strchr(pbuf, ':');
+    	sscanf((pbuf+1), "%s", SWUpdateData.SWUpdateFileID);
+    }
+    pbuf = strstr(buf, "TranSoftFileFlag:");
+    if (pbuf != NULL)
+    {
+    	pbuf = strchr(buf, ':');
+    	SWUpdateData.TranSoftFileFlag = atoi(pbuf+1);//数据
+    }
+    pbuf = strstr(buf, "SWUpdateResponseFlag:");
+    if (pbuf != NULL)
+    {
+    	pbuf = strchr(buf, ':');
+    	SWUpdateData.SWUpdateResponseFlag = atoi(pbuf+1);//数据
+    }
+    pbuf = strstr(buf, "UpdateFilePackId:");
+    if (pbuf != NULL)
+    {
+    	pbuf = strchr(buf, ':');
+    	SWUpdateData.UpdateFilePackId = atoi(pbuf+1);//数据
+    }
+    pbuf = strstr(buf, "UpdateFilePackAddr:");
+    if (pbuf != NULL)
+    {
+    	pbuf = strchr(buf, ':');
+    	SWUpdateData.UpdateFilePackAddr = atoi(pbuf+1);//数据
+    }
+  }
+  fclose(fp);
+  printf("LoadUpdatePara END ...\n");
+}
+
+/*******************************************************************************
+*函数名称 : void  NewSoftUpdate(void)
+*功    能 : 新的软件更新
+*输入参数 : None
+*输出参数 : None
+*******************************************************************************/
+void  NewSoftUpdate(void)
+{
+  SWUpdateData.SWRunMode = SW_UPDATE_MODE;
+  SWUpdateData.NextFilePackId = 0x00;
+
+  SWUpdateData.UpdateFileLen = 0;//更新的软件长度
+  g_UpdateStartTime = time(NULL);//更新软件过程定时
+  SaveUpdatePara();
+}
+
+/*******************************************************************************
+*函数名称 : int SWUpdateResponse(void)
+*功    能 : 软件升级文件数据包应答控制函数
+*输入参数 : None
+*输出参数 : 软件升级文件数据包应答标志数据
+*******************************************************************************/
+int SWUpdateResponse(void)
+{
+	DevicePara_t *p_devpara;
+	FILE  *fp = NULL;
+	char *pbuf, rbuf[250];
+
+	//假设软件升级成功,根据下面的判断升级结果进行更新
+	p_devpara = &g_DevicePara;
+	//0：表示成功接收,可以继续接收后续数据包,
+	//1：表示请求监控中心重发数据包（前提,之前的包成功接收）,
+	//2：表示请求监控中心延时TP后继续发送数据包（前提,此包成功接收）,
+	//3：表示请求监控中心取消软件升级
+	//4：表示由于文件中的厂家标识错误,设备终止软件升级,
+	//5：表示由于文件中的设备标识错误,设备终止软件升级,
+	//软件升级包数大于设备允许的最大报数
+	if(SWUpdateData.UpdateFilePackId > MAXUPDATEFILEPACKSUM)
+	{
+		p_devpara->SWUpdateResult = 1; //1:表示设备终止软件升级
+		DbSaveThisIntPara(SWUPDATERESULT_ID, p_devpara->SWUpdateResult);
+		return  6;//6:表示由于文件中的其它错误,设备终止软件升级
+	}
+	//在断点续传时,OMC从0包开始传出文件
+	if(SWUpdateData.UpdateFilePackId != SWUpdateData.NextFilePackId)
+	{
+		//传送的数据包与存储需要传输的数据包不符合,OMC从0包开始传输
+		if(SWUpdateData.UpdateFilePackId == 0x00)//0x00表示成功接收,可以继续接收后续数据包
+		{
+		  	NewSoftUpdate();//OMC不从断点处传输数据,从0包开始
+		  	return  0;//2:表示请求OMC延时TP后继续发送数据包(前提,此包成功接收)
+		}
+		else
+		{
+		  	return  1;//1:表示请求监控中心重发数据包(前提,之前的包成功接收)
+		}
+	}
+
+	fp = fopen(SOFT_UPDATETMP, "r");
+	if(fp == NULL) //需要打开的文件不存在,重新建立
+		return 0;
+	rewind(fp);//指向文件头
+	memset(rbuf, 0, sizeof(rbuf));
+	fgets(rbuf, sizeof(rbuf), fp);//逐行读取文件
+
+	pbuf = strstr(rbuf, MANUFACTURER_INFO);
+	if (pbuf == NULL)
+	{
+		p_devpara->SWUpdateResult = 3; //1:表示设备终止软件升级
+		DbSaveThisIntPara(SWUPDATERESULT_ID, p_devpara->SWUpdateResult);
+		return  4;//4:表示由于文件中的厂家标识错误,设备终止软件升级
+	}
+	memset(rbuf, 0, sizeof(rbuf));
+	fgets(rbuf, sizeof(rbuf), fp);//逐行读取文件
+
+	pbuf = strstr(rbuf, DEV_VERSION);
+	if (pbuf == NULL)
+	{
+		p_devpara->SWUpdateResult = 3; //1:表示设备终止软件升级
+		DbSaveThisIntPara(SWUPDATERESULT_ID, p_devpara->SWUpdateResult);
+		return  5;//5:表示由于文件中的设备标识错误,设备终止软件升级
+	}
+	fclose(fp);
+	return  0;//0:表示成功接收,可以继续接收后续数据包
+}
+
+/*******************************************************************************
+*函数名称 : void MCP_B_SetCommand(APPack_t *p_packbuf)
+*功    能 : 监控控制层协议MAP_B APC协议进行软件升级控制函数
+*输入参数 : APPack_t *p_packbuf:通讯数据包数据结构指针
+*输出参数 : 查询数据正确数据包长度,错误返回-1
+*******************************************************************************/
+int MCP_B_SetCommand(APPack_t *p_packbuf)
+{
+int objectlen, objectid, pdustart, result, i, j;
+DevInfo_t devinfo;
+FILE  *fp = NULL;
+
+	//g_UpdateStartTime = time(NULL);//更新软件过程定时
+  //以下各项参数在回复时不变,起始、结束标志,AP层协议类型,VP:A承载协议类型,站点编号,设备编号,通讯包标识号不变,MCP层协议标识
+  //StartFlag, EndFlag, APType, VPType, StationNo, DeviceNo, PackNo, MCPFlag
+  //以下非数据单元各项根据协议进行修改
+  p_packbuf->VPInteractFlag = VP_INTERACT_NORMAL;// 通讯请求执行正常,VP层交互标志,0x00
+  p_packbuf->CommandFlag = COMMAND_SET;// 命令标识:查询
+  p_packbuf->ResponseFlag = RESPONSE_SUCCESS;// 应答标志:成功
+  
+  g_UpdateOverTime = time(NULL);//远程通信超时定时
+
+  pdustart = GetDevInfo(&devinfo, p_packbuf);
+
+	//正常参数查询
+  result = 0;
+  //数据单元根据协议数据ID号进行修改
+  for (i = 0; i < (p_packbuf->PackLen - AP_MSG_HEAD_TAIL_LEN); )//AP_MSG_HEAD_TAIL_LEN:17,数据包控制协议字节数(除数据单元外所有数据)
+  {
+		if (p_packbuf->PackValue[i] == 0)//数据长度错误
+	  {
+	  	DEBUGOUT("MCP_B QueryCommand:PackValue Len Error...");
+	  	goto MCP_B_SETFAILURE;
+	  }
+    //MCP_B协议数据长度2字节,标识2字节,总计-4字节
+    objectlen = p_packbuf->PackValue[i]+(p_packbuf->PackValue[i+1] * 0x100) - 4;
+    // 数据单元数据标识,ID
+    objectid = p_packbuf->PackValue[i+2]+(p_packbuf->PackValue[i+3] * 0x100);
+		switch(objectid)
+    {
+      case  0x0202://下一个文件数据块序号
+        p_packbuf->PackValue[i+4] = (INT8U)(SWUpdateData.NextFilePackId & 0xFF);
+        p_packbuf->PackValue[i+5] = (INT8U)((SWUpdateData.NextFilePackId >> 8) & 0xFF);
+        p_packbuf->PackValue[i+6] = (INT8U)((SWUpdateData.NextFilePackId >> 16) & 0xFF);
+        p_packbuf->PackValue[i+7] = (INT8U)((SWUpdateData.NextFilePackId >> 24) & 0xFF);
+        result = 1;
+      break;
+      case  0x0203://数据块长度
+        p_packbuf->PackValue[i+4] = (INT8U)(SWUpdateData.UpdatePackLen & 0xFF);
+        p_packbuf->PackValue[i+5] = (INT8U)((SWUpdateData.UpdatePackLen >> 8) & 0xFF);
+        result = 1;
+      break;
+      case  0x0301://文件标识码,判断是否是有效的数据包
+        pdustart = 0;//判断文件标识码与原来存储是否相同
+        for(j = 0; j < objectlen; j++)
+        {
+          //文件标识码与原来存储文件标识码不同,认为是传输新的软件
+          if(SWUpdateData.SWUpdateFileID[j] != p_packbuf->PackValue[i+4+j])
+          {
+            SWUpdateData.SWUpdateFileID[j] = p_packbuf->PackValue[i+4+j];
+            pdustart = 1;
+          }
+        }
+        if(pdustart != 0)//文件标识码与原来存储文件标识码不同,认为是传输新的软件
+        {
+          NewSoftUpdate();
+        }
+        result = 1;
+      break;
+      case  0x0302://文件传输控制
+        SWUpdateData.TranSoftFileFlag = p_packbuf->PackValue[i+4];
+        result = 1;
+      break;
+      case  0x0303://文件数据包应答,为设备处理后的实际值,在0x0305中根据数据块的处理进行返回
+        SWUpdateData.SWUpdateResponseFlag = p_packbuf->PackValue[i+4];
+        result = 1;
+      break;
+      case  0x0304://文件数据块序号
+      	SWUpdateData.UpdateFilePackId = p_packbuf->PackValue[i+4]	+ p_packbuf->PackValue[i+5] * 0x100
+                                      + p_packbuf->PackValue[i+6] * 0x10000 + p_packbuf->PackValue[i+7] * 0x1000000;
+        result = 1;
+      break;
+      case  0x0305://升级文件数据块,数据存储到升级文件
+      	//发送给设备时必须按照0x0303、0x0304、0x0305的排列顺序
+      	//0x0303:根据软件升级文件数据包应答结果,为设备处理后的实际值,0:表示成功接收,可以继续接收后续数据包
+      	//执行成功时,0x0304为原值返回,0x0305为原值返回,而0x0303则为设备处理后的实际值
+      	if (SWUpdateData.UpdateFilePackId > 0)
+        {
+        	SWUpdateData.SWUpdateResponseFlag = SWUpdateResponse();//软件升级文件数据包应答
+        	if ((p_packbuf->PackValue[2] + p_packbuf->PackValue[3] * 0x100) == 0x0303)
+        	{
+          	p_packbuf->PackValue[4] = SWUpdateData.SWUpdateResponseFlag;
+          }
+        }
+        else
+        {
+        	SWUpdateData.SWUpdateResponseFlag = 0;
+        }
+printf("\r\nSWUpdateData.SWUpdateResponseFlag:%d\r\n", SWUpdateData.SWUpdateResponseFlag);
+        if((SWUpdateData.SWUpdateResponseFlag== 0)//0:表示成功接收,可以继续接收后续数据包
+        || (SWUpdateData.SWUpdateResponseFlag == 2))//2:表示请求OMC延时TP后继续发送数据包(断点续传时OMC从0开始发送,设备需要擦除FLASH)
+        {
+        	if (SWUpdateData.UpdateFilePackId == 0)
+        		fp = fopen(SOFT_UPDATETMP, "wb");
+        	else
+						fp = fopen(SOFT_UPDATETMP, "ab");
+  				if (fp == NULL) return -1;
+  				//fseek(fp, (SWUpdateData.UpdateFilePackId*UPDATEBLOCK_LEN), SEEK_SET);
+ComDataHexDis(&p_packbuf->PackValue[i+4], objectlen);
+printf("\r\n");
+ 					fwrite(&p_packbuf->PackValue[i+4], 1, objectlen, fp);
+					fclose(fp);
+	        if (SWUpdateData.UpdateFilePackId == 0)//判断是否是厂家标识错误，设备标识错误
+	        {
+	        	SWUpdateData.SWUpdateResponseFlag = SWUpdateResponse();//软件升级文件数据包应答
+	        	if ((p_packbuf->PackValue[2] + p_packbuf->PackValue[3] * 0x100) == 0x0303)
+	        	{
+	          	p_packbuf->PackValue[4] = SWUpdateData.SWUpdateResponseFlag;
+	        	}
+	        	if((SWUpdateData.SWUpdateResponseFlag== 4)//4：表示由于文件中的厂家标识错误,设备终止软件升级
+	          || (SWUpdateData.SWUpdateResponseFlag == 5))//5：表示由于文件中的设备标识错误,设备终止软件升级
+	          {
+							fp = fopen(SOFT_UPDATETMP,"w");
+	  					if (fp == NULL) return -1;
+	  					fclose(fp);
+	  				}
+	        }
+          SWUpdateData.UpdateFileLen = SWUpdateData.UpdateFileLen + objectlen;//更新软件的长度
+          SWUpdateData.NextFilePackId = SWUpdateData.UpdateFilePackId + 1;//存储下一包标号
+        }
+
+        else if(SWUpdateData.SWUpdateResponseFlag == 1)//1:表示请求监控中心重发数据包（前提，之前的包成功接收
+        {
+        	if (SWUpdateData.UpdateFilePackId > SWUpdateData.NextFilePackId)//中间有丢包,重发下一包标号
+        	{
+        		p_packbuf->PackValue[4] = 1;
+        	}
+        	else//发送以前包,不处理
+        	{
+        		p_packbuf->PackValue[4] = 0;
+        	}
+        }
+        else//设备终止软件升级
+        {
+					fp = fopen(SOFT_UPDATETMP,"w");
+  				if (fp == NULL) return -1;
+  				fclose(fp);
+        	SWUpdateData.UpdateFileLen = 0x00;
+          SWUpdateData.NextFilePackId = 0x00;
+        }
+        //0305的数据不全返回,只返回一个数据,以减少通讯压力
+        p_packbuf->PackValue[i] = 5;
+        p_packbuf->PackValue[i+1] = 0;
+        p_packbuf->PackValue[i+4] = 0;
+        p_packbuf->PackLen = AP_MSG_HEAD_TAIL_LEN+5+8+5;//0303,0304,0305重新组包
+        SaveUpdatePara();//存储升级数据
+        result = 1;
+      break;
+    }
+    i = i+4+objectlen;//数据长度+ID+数据
+  }
+  if (result == 1)//查询数据成功
+  {
+    return  p_packbuf->PackLen;
+  }
+  else
+  {
+MCP_B_SETFAILURE:
+    DEBUGOUT("MCP_B Set Command Failure!\r\n");
+    ClearAPPackBuf(p_packbuf);
+    return -1;
+  }
+}
+
+/*******************************************************************************
+*函数名称 : int SWUpdateNotification(void)
+*功    能 : 软件更新结果上报
+*输入参数 : None
+*输出参数 : None
+*******************************************************************************/
+int SWUpdateNotification(void)
+{
+//  if(SWUpdateData.SWRunMode == UPDATEMODE)//结束一次软件升级,升级结果上报
+//  {
+//    if(SWUpdateData.UpdateNotificationFlag == 2)
+//    {
+//      RptNotification(UpdateResultNotify);//软件更新信息上报
+//
+//      SWUpdateData.UpdateNotificationFlag = 1;//软件更新结果上报标志,0:无上报,1:已经上报,2:有上报数据
+//      if(g_RptGeneralInfo.UpdateResult == 0)//软件升级成功
+//      {
+//        SWUpdateData.SWRunMode = MONITORMODE;//软件升级模式修改为监控模式
+//      }
+//      SaveUpdateData();
+//    }
+//  }
+}
+
+/*******************************************************************************
+*函数名称 : void  CheckUpdateResult(void)
+*功    能 : 判断设备执行软件升级的结果
+*输入参数 : None
+*输出参数 : None
+*******************************************************************************/
+void CheckUpdateResult(void)
+{
+DevicePara_t *p_devpara;
+INT8U   data;
+INT16U  crc;
+FILE  *fp = NULL;
+
+  //假设软件升级成功,根据下面的判断升级结果进行更新
+	p_devpara = &g_DevicePara;
+  p_devpara->SWUpdateResult = 0;//0:表示已经成功完成升级
+  crc = 0;
+	fp = fopen(SOFT_UPDATETMP,"rb");
+ 	if (fp == NULL)
+ 	{
+ 		return -1;
+ 	}
+  while(SWUpdateData.UpdateFileLen)
+  {
+    fread(&data, 1, 1, fp);
+    crc = (crc << 8) ^ CCITT_CRC16Table[((crc >> 8) ^ data) & 0xFF];
+    SWUpdateData.UpdateFileLen--;
+  }
+	fclose(fp);
+  if((SWUpdateData.SWUpdateFileID[0] != (INT8U)(crc ))
+  || (SWUpdateData.SWUpdateFileID[1] != (INT8U)(crc >> 8)))
+  {
+  	DEBUGOUT("CRC校验失败:%4X\r\n", crc);
+    p_devpara->SWUpdateResult = 3;//3:表示文件检查失败
+  }
+	//判断设备执行软件升级的结果,p_devpara->SWUpdateResult
+  switch(SWUpdateData.SWUpdateResponseFlag)//0x0303,SWUpdateData.SWUpdateResponseFlag:文件数据包应答
+  {
+    case  0://0:表示成功接收,可以继续接收后续数据包
+    break;
+    case  1://1:表示请求OMC重发数据包(前提,之前的包成功接收)
+    break;
+    case  2://2:表示请求OMC延时TP后继续发送数据包(前提,此包成功接收)
+    break;
+    case  3://3:表示请求OMC取消软件升级
+      p_devpara->SWUpdateResult = 2;//2:表示OMC取消软件升级
+    break;
+    case  4://4:表示由于文件中的厂家标识错误,设备终止软件升级
+      p_devpara->SWUpdateResult = 3;//3:表示文件检查失败
+    break;
+    case  5://5:表示由于文件中的设备标识错误,设备终止软件升级
+      p_devpara->SWUpdateResult = 3;//3:表示文件检查失败
+    break;
+    case  6://6:表示由于文件中的其它错误,设备终止软件升级
+      p_devpara->SWUpdateResult = 17;//17:表示其它异常中断软件升级
+    break;
+  }
+  DbSaveThisIntPara(SWUPDATERESULT_ID, p_devpara->SWUpdateResult);
+}
+/*******************************************************************************
+*函数名称 : void UpdateModeApp(void)
+*功    能 : 系统在软件升级模式下运行的应用程序
+*输入参数 : None
+*输出参数 : None
+*******************************************************************************/
+void UpdateModeApp(void)
+{
+int updatetime;
+char syscmd[150];
+
+	if (g_MCPFlag == MCP_B)
+	{
+    switch(SWUpdateData.TranSoftFileFlag)//0x0302:文件传输控制
+    {
+      case  1://1:表示文件传输开始
+      break;
+      case  2://2:表示文件传输结束
+        SWUpdateData.NextFilePackId = 0;//0x0202: 下一个文件数据块序号
+      break;
+      case  3://3:表示监控中心取消软件升级
+      	DEBUGOUT("ID0x0018:3,OMC取消软件升级!\r\n");
+      	g_MCPFlag = MCP_C;//软件升级正常结束后,切换到MAP_A APC
+				//假设升级过程中设备出现重启等故障无法完成升级,正常升级后此数据会按实际情况修改
+  			g_DevicePara.SWUpdateResult = 2;//2:表示OMC取消软件升级
+  			DbSaveThisIntPara(SWUPDATERESULT_ID, g_DevicePara.SWUpdateResult);
+				g_DevicePara.SWRunMode = SW_MONITOR_MODE;//0x0010(MCP_A)切换到0:监控模式
+				DbSaveThisIntPara(SWRUNMODE_ID, g_DevicePara.SWRunMode);
+				//升级模式下,控制参数定义
+				//SWUpdateData.NextFilePackId = 0;//0x0202: 下一个文件数据块序号
+				SWUpdateData.SWRunMode = SW_UPDATE_MODE;//0x0201(MCP_B)设备监控软件运行模式 软件升级模式
+        SaveUpdatePara();//设备监控软件运行模式,升级时下一个文件数据块序号
+        sleep(3);
+          system("reboot");//复位重新开始运行程序
+//        UpdateNotification(2);//升级上报,2:表示OMC取消软件升级
+      break;
+      case  4://4:表示软件升级正常结束
+      	DEBUGOUT("ID0x0018:4,软件升级正常结束!\r\n");
+        CheckUpdateResult();//0:表示已经成功完成升级
+        g_DevicePara.SWRunMode = SW_MONITOR_MODE;//0x0010(MCP_A)切换到0:监控模式
+        DbSaveThisIntPara(SWRUNMODE_ID, g_DevicePara.SWRunMode);//存储升级过程中的升级过程中,产生的参数
+        g_MCPFlag = MCP_C;//软件升级正常结束后,切换到MAP_A APC
+        
+        if(g_DevicePara.SWUpdateResult == 0)//升级成功
+        {
+        	DEBUGOUT("软件升级成功!\r\n");
+					//升级模式下,控制参数定义
+					SWUpdateData.NextFilePackId = 0;//0x0202: 下一个文件数据块序号
+					SWUpdateData.SWRunMode = SW_UPDATE_MODE;//0x0201(MCP_B)设备监控软件运行模式 软件升级模式
+        	SaveUpdatePara();//设备监控软件运行模式,升级时下一个文件数据块序号
+        	PreSoftBackup();
+					sleep(3);
+          //11.18
+          //将以前软件备份,新程序重新放到运行位置
+          //FirmwareUpdate(0);//软件升级,软件升级参数运行模式还是升级模式
+          //在主监控中,监控软件运行在监控模式,而软件升级参数的运行模式为升级模式,则上报软件升级成功
+          system("reboot");//复位重新开始运行程序
+        }
+        else//软件升级失败
+        {
+        	DEBUGOUT("软件升级失败重启!\r\n");
+  				SWUpdateData.SWRunMode = SW_UPDATE_MODE;
+  				SWUpdateData.NextFilePackId = 0;
+  				SWUpdateData.UpdateFileLen = 0;//更新的软件长度
+  				SWUpdateData.UpdateFilePackId = 0;
+  				SaveUpdatePara();
+          system("reboot");//复位重新开始运行程序
+        }
+      break;
+    }
+    
+    updatetime = (int)(time(NULL) - g_UpdateStartTime);//更新软件过程定时
+    //接收定时器(T5):位于直放站设备,用于判断是否与OMC的通信中断.
+    //当设备每接收到一个通信包或从监控模式切换到远程升级模式时就重新开始计时,
+    //当计时大于TOT3时就判定为通信中断,此时设备应重新启动并进入监控模式.
+    DEBUGOUT("更新软件过程定时:%d!\r\n", updatetime);
+    //if(updatetime > (5*60))//大于要求时间,转到监控模式下运行软件,要求15分钟内完成升级
+    if(updatetime > (15*60))//大于要求时间,转到监控模式下运行软件,要求15分钟内完成升级
+    {
+    	DEBUGOUT("软件升级远程通信超时失败重启!\r\n");
+      g_DevicePara.SWUpdateResult = 6;//6:表示远程通信超时
+      DbSaveThisIntPara(SWUPDATERESULT_ID, g_DevicePara.SWUpdateResult);
+      g_DevicePara.SWRunMode = SW_MONITOR_MODE;//0x0010(MCP_A)切换到0:监控模式
+      DbSaveThisIntPara(SWRUNMODE_ID, g_DevicePara.SWRunMode);//存储升级过程中的升级过程中,产生的参数
+      sleep(3);
+      system("reboot");//复位重新开始运行程序
+    }
+
+    updatetime = (int)(time(NULL) - g_UpdateOverTime);//远程通信超时
+	DEBUGOUT("22222 updatetime=%d\n", updatetime);
+    //if(updatetime > 9)//发送间隔时间300ms*30间隔
+    if(updatetime > 30)//发送间隔时间300ms*30间隔
+    {
+    	DEBUGOUT("软件升级远程通信超时失败重启!\r\n");
+      g_DevicePara.SWUpdateResult = 6;//6:表示远程通信超时
+      DbSaveThisIntPara(SWUPDATERESULT_ID, g_DevicePara.SWUpdateResult);
+      g_DevicePara.SWRunMode = SW_MONITOR_MODE;//0x0010(MCP_A)切换到0:监控模式
+      DbSaveThisIntPara(SWRUNMODE_ID, g_DevicePara.SWRunMode);//存储升级过程中的升级过程中,产生的参数
+      sleep(3);
+      system("reboot");//复位重新开始运行程序
+    }
+
+    if ((SWUpdateData.SWUpdateResponseFlag == 3) || (SWUpdateData.SWUpdateResponseFlag == 4)
+    	||(SWUpdateData.SWUpdateResponseFlag == 5) || (SWUpdateData.SWUpdateResponseFlag == 6))
+    {
+    	DEBUGOUT("设备终止软件升级,重启!\r\n");
+      g_DevicePara.SWRunMode = SW_MONITOR_MODE;//0x0010(MCP_A)切换到0:监控模式
+      DbSaveThisIntPara(SWRUNMODE_ID, g_DevicePara.SWRunMode);//存储升级过程中的升级过程中,产生的参数
+      sleep(3);
+      system("reboot");//复位重新开始运行程序
+    }
+	}
+	if (g_MCPFlag == SW_VERISONSWITCH_MODE)
+	{
+  	DEBUGOUT("软件版本切换,重启................\r\n");
+    sleep(1);
+    system("reboot");//复位重新开始运行程序
+	}
+}
+
+/*******************************************************************************
+*函数名称 : void  UpdateTest(void)
+*功    能 : 系统在升级测试的应用程序
+*输入参数 : None
+*输出参数 : None
+*******************************************************************************/
+void  UpdateTest(void)
+{
+//INT8U   i;
+//INT32U  j, Flash_Destination;
+//
+//  if(g_SelfSetData.UpLinkGainOffset == 12)
+//  {
+//   //将片外Flash 29F040存储的程序烧写在0x8000 0000~0x8001 FFFF片内Flash内
+//    Flash_Destination = 0x80000000;
+//    j = 0;
+//    if((F29040SectorErase(PROGRAM_SA0) == 1)
+//     &&(F29040SectorErase(PROGRAM_SA1) ==1))
+//    {
+//      while(Flash_Destination < 0x80020000)
+//      {
+//        i =  *(u8*)Flash_Destination;
+//        F29040ByteWrite((PROGRAM_SA0 * 0x10000 +j), i);
+//        Flash_Destination++;
+//        j++;
+//      }
+//    }
+//    g_SelfSetData.UpLinkGainOffset++;
+//  }
+//  if(g_SelfSetData.UpLinkGainOffset == 16)//从片外Flash拷贝程序
+//  {
+//    FirmwareUpdate(0);
+//  }
+//
+//  if(g_SelfSetData.UpLinkGainOffset == 22)//以前版本软件备份
+//  {
+//    PreFirmwareBackup();//以前版本软件备份
+//    g_SelfSetData.UpLinkGainOffset++;
+//  }
+//  if(g_SelfSetData.UpLinkGainOffset == 26)//以前版本软件备份
+//  {
+//    FirmwareUpdate(1);
+//  }
+}
+/********************  COPYRIGHT(C) 2014 ***************************************/

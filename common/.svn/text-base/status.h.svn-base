@@ -1,0 +1,25 @@
+#ifndef _STATUS_H
+#define _STATUS_H
+#include "type_def.h"
+#define DEVICE_TYPE_MAIN 1
+#define DEVICE_TYPE_EXPEND 2
+#define DEVICE_TYPE_RAU 3
+#define DRU_DEBUG 1
+
+#define BUFFER_NULL 0
+#define BUFFER_READ 1
+#define BUFFER_WRITE 2
+#define DEBUG_PRINTF printf
+//#define DEBUG_PRINTF \/\/
+//#endif
+
+U8 read_device_type(void);
+int read_net_type(void);
+int get_net_type(void);
+U8 get_device_type(void);
+void read_pkg_version(void);
+int get_net_group(void);
+
+
+
+#endif

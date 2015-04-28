@@ -1,0 +1,2 @@
+/home/huyubin/dru_port6_main/drv/ksz8851mll/ks8851_mll.ko
+/home/huyubin/dru_port6_main/drv/ksz8851mll/ks8851_mll.o

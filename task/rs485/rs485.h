@@ -1,0 +1,30 @@
+#ifndef _RS485_H_
+#define _RS485_H_
+
+/*
+** 函数功能：创建RS485线程
+** 输入参数：arg=输入参数
+** 输出参数：无
+** 返回值：无
+** 备注：
+*/
+extern int creat_rs485_task(void);
+/*
+** 函数功能：灯板初始化
+** 输入参数：无
+** 输出参数：无
+** 返回值：0=成功 其他=失败
+** 备注：
+*/
+extern int init_led(unsigned char sta);
+extern int init_power(unsigned char sta);
+/*
+** 函数功能: 灯板设置组包
+** 输入参数：无
+** 输出参数：无
+** 返回值：0=成功 其他=失败
+** 备注：
+*/
+extern int led_para_pack_power(DevInfo_t * p_devinfo, int packno, APPack_t * p_packbuf);
+extern int led_para_pack_led(DevInfo_t * p_devinfo, int packno, APPack_t * p_packbuf);
+#endif

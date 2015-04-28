@@ -1,0 +1,432 @@
+#include "unp.h"
+#include "apue.h"
+#include "errno.h"
+#include "common.h"
+#include "udp_relay.h"
+#include "../net/netcom.h"
+#include "../net/dru_connect.h"
+
+extern int g_DevType;
+extern unsigned long serverip;
+extern unsigned long long get_dev_port_num(void);
+
+#define AU_PORT 30000
+#define EU_RU_PORT 30001
+
+#define UPDATE_TOPOLOGIC 1
+#define QUERY_CMD 2
+#define SET_CMD   3
+
+#define BUFLEN 0x400
+
+char recv_buf[BUFLEN]; // 接收缓冲区
+char send_buf[BUFLEN]; // 发送缓冲区
+volatile unsigned char m_state = IDLE; // 扩展单元数据转发状态
+volatile unsigned char m_relay_state = 0;
+struct ru_para{
+	unsigned int id;
+	unsigned char len;
+};
+struct ru_para read_para_st[] =  // 查询参数
+{
+	{0x08000060, 1}, // 远端光收发模块告警
+	{0x08000220, 1}, // WLAN/固网宽带接入状态
+	{0x08000500, 1}, // 远端设备温度
+	{0x08000000, 1}, // 远端光收功率
+	{0x08000020, 1}, // 远端光发功率
+	{0x08001080, 4}, //GSM远端下行链路时延
+	{0x08004080, 4}, 
+	{0x08007080, 4}, 
+	{0x08008080, 4}, 
+	{0x08001100, 1}, //GSM远端下行输出导频功率
+	{0x08004100, 1}, 
+	{0x08007100, 1}, 
+	{0x08008100, 1}, 
+	{0x08001180, 1}, // 远端上行理论增益
+	{0x08004180, 1}, 
+	{0x08007180, 1}, 
+	{0x08008180, 1}, 
+	{0x08001200, 1},  // 远端下行实际增益
+	{0x08004200, 1}, 
+	{0x08007200, 1}, 
+	{0x08008200, 1}, 
+
+};
+struct ru_para write_para_st[] =  // 设置参数
+{
+	{0x08001280, 1},  // 远端射频信号开关
+	{0x08004280, 1}, 
+	{0x08007280, 1}, 
+	{0x08008280, 1}, 
+	{0x08001300, 1},  // 远端上行衰减值
+	{0x08004300, 1}, 
+	{0x08007300, 1}, 
+	{0x08008300, 1}, 
+	{0x08001380, 1},  // 远端下行衰减值
+	{0x08004380, 1}, 
+	{0x08007380, 1}, 
+	{0x08008380, 1}, 
+}
+#define READ_PARA_CNT (sizeof(read_para_st)/sizeof(struct ru_para))
+#define WRITE_PARA_CNT (sizeof(WRITE_para_st)/sizeof(struct ru_para))
+unsigned int m_read_para_cnt;
+unsigned int m_write_para_cnt;
+
+// 自定义数据转发协议
+#progma pack (1)
+struct relay_pack{
+	unsigned short int len;  // 数据包长度，包括len
+	unsigned long long topologic_num;  // 网络拓扑数
+	unsigned char port_num;  // 端口号
+	unsigned char cmd;       // 命令  02:查询  03:设置
+	unsigned char buf[0];    // 零长数组，指向变长数据，由多个TLV组成
+};
+struct mcp_c_ltv{         // mcp_c数据格式
+	unsigned char len;  // 长度
+	unsigned int tag;   // 命令表示
+	unsigned char v[0]; // 数据内容指针
+};
+#progma pack()
+
+#define PACK_HEAD_LEN (sizeof(struct relay_pack))
+unsigned int m_pack_head_len;
+// 获取转发状态
+unsigned char get_relay_state(void)
+{
+	return m_state;
+}
+// 设置转发状态
+void set_relay_state(unsigned char * sta)
+{
+	m_state = sta;
+}
+// 获取IP地址，4字节格式
+void get_ip_char(unsigned char * tbuf)
+{
+	unsigned int ip = 0;
+
+	ip = GetSelfIp("eth0");
+	inet_ntop(AF_INET, (void *)&ip, tbuf, 4);
+	return;
+}
+// 组织转发包的包头
+void packed_relay_head(char * tbuf, unsigned char cmd, unsigned char idx)
+{
+	struct relay_pack * p;
+	
+	p = (struct relay_pack *)tbuf;
+	p->len = m_pack_head_len;  // 初始化包头长度
+	p->topologic_num = get_dev_port_num();    // 填写本机拓扑数
+	p->port_num = idx;       // 端口号
+	p->cmd = cmd;            // 数据包功能
+	return;
+}
+// 向转发数据包中添加LTV
+void add_ltv(char * tbuf, char * ltv)
+{
+	struct relay_pack * p;
+	struct mcp_c_ltv * from, to; 
+
+	p = (struct relay_pack *)tbuf;
+	to = (struct mcp_c_ltv *)&(p->buf[p->len-m_pack_head_len]); // 指向缓冲区末尾，添加新的LTV
+	from = (struct mcp_c_ltv *)ltv;
+	to->len = from->len;              // 添加len字段
+	to->tag = from->tag;              // 添加tag字段
+	memcpy(to->v, from->v, from->len); // 添加value字段
+	p->len += from->len;              // 修改数据包长度
+}
+// 发送查询远端数据
+void pack_relay_send(unsigned char cmd, unsigned char port_num)
+{
+	unsigned char cnt; 
+	struct mcp_c_ltv * p;
+	struct relay_pack * m;
+	struct sockaddr_in to_addr;
+	unsigned char tbuf[128];
+	unsigned int i = 0;
+
+	m = (struct relay_pack *)send_buf;
+	memset(tbuf, 0, 128);
+	packed_relay_head(send_buf, cmd, port_num); // 初始化包头
+	if(cmd == QUERY_CMD){
+		for(i = 0; i < m_read_para_cnt; i++){
+			p = (struct mcp_c_ltv *)tbuf;
+			p->len = read_para_st[i].len;
+			p->id = read_para_st[i].id;
+			add_ltv(send_buf, tbuf);
+		}
+	}else{
+		for(i = 0; i < m_write_para_cnt; i++){
+			p = (struct mcp_c_ltv *)tbuf;
+			p->len = write_para_st[i].len;
+			p->id = write_para_st[i].id;
+			add_ltv(send_buf, tbuf);
+		}
+		// 读取数据库，更新数据
+		read_mcpc_eu(m->buf, m->len - m_pack_head_len, port_num); 
+	}
+	to_addr.sin_family = AF_INET;
+	to_addr.sin_addr.s_addr = serverip; // 主单元IP地址和端口
+	to_addr.sin_port = AU_PORT;
+	sendto(sockfd, send_buf, m->len, 0, (struct sockaddr *)&to_addr, sizeof(to_addr));
+	set_relay_send(BUSY); // 设置转发状态为BUSY
+}
+// 获取接收到的数据
+// len: 输出参数，返回有效数据的长度
+unsigned char * get_recv_relay(unsigned int * len)
+{
+	struct relay_pack * p;
+
+	p = (struct relay_pack *)recv_buf;
+	*len = p->len - m_pack_head_len;
+
+	return p->buf;
+}
+// EU保存参数
+void save_mcpc_eu(unsigned char * tbuf, unsigned int len, unsigned char port_num)
+{
+	DevInfo_t devinfo;
+	struct mcp_c_ltv * t; 
+	unsigned char cnt = 0;
+
+	memset((char *)&devinfo, 0, sizeof(devinfo));
+	while(len > 0){
+		t = (struct mcp_c_ltv *)tbuf;
+		cnt = t->len;
+		SetParaValue_MCP_C(&devinfo, t->tag + port_num, tbuf); 
+		len -= cnt;
+		p_tmp += cnt;
+	}
+}
+// EU读取参数
+void read_mcpc_eu(unsigned char * tbuf, unsigned int len, unsigned char port_num)
+{
+	DevInfo_t devinfo;
+	struct mcp_c_ltv * t; 
+	unsigned char cnt = 0;
+
+	memset((char *)&devinfo, 0, sizeof(devinfo));
+	while(len > 0){
+		t = (struct mcp_c_ltv *)tbuf;
+		cnt = t->len;
+		QueryParaValue_MCP_C(&devinfo, t->tag + port_num, tbuf); 
+		len -= cnt;
+		p_tmp += cnt;
+	}
+}
+//
+// 远端应答
+void response_relay_ru(void)
+{
+	struct relay_pack * sp, rp;
+	struct mcp_c_ltv * t; 
+	unsigned char * p_tmp;
+	DevInfo_t devinfo;
+	unsigned int len = 0;
+	struct sockaddr_in to_addr;
+
+	memset((char *)&devinfo, 0, sizeof(devinfo));
+	sp = (struct relay_pack *)send_buf;
+	rp = (struct relay_pack *)recv_buf;
+	memcpy(send_buf, recv_buf, m_pack_head_len);
+	memcpy(sp->buf, rp->buf, rp->len - m_pack_head_len);
+	sp->topologic_num = get_dev_port_num();    // 填写本机拓扑数
+	if(sp->cmd == QUERY_CMD){ // 查询命令
+		len = sp->len - m_pack_head_len;
+		p_tmp = sp->buf;
+		while(len > 0){
+			t = (struct mcp_c_ltv *)p_tmp;
+			QueryParaValue_MCP_C(&devinfo, t->tag, p_tmp);
+			len -= t->len;
+			p_tmp += t->len;
+		}
+	}else if(sp->cmd == SET_CMD){  // 设置命令
+		len = sp->len - m_pack_head_len;
+		p_tmp = sp->buf;
+		while(len > 0){
+			t = (struct mcp_c_ltv *)p_tmp;
+			SetParaValue_MCP_C(&devinfo, t->tag, p_tmp); 
+			len -= t->len;
+			p_tmp += t->len;
+		}
+	}
+	to_addr.sin_family = AF_INET;
+	to_addr.sin_addr.s_addr = serverip; // 主单元IP地址和端口
+	to_addr.sin_port = AU_PORT;
+	sendto(sockfd, send_buf, sp->len, 0, (struct sockaddr *)&to_addr, sizeof(to_addr));
+}
+// EU接收到的数据处理
+void eu_deal(void)
+{
+	struct relay_pack * rp;
+	struct mcp_c_ltv * t; 
+	unsigned char * p_tmp;
+	DevInfo_t devinfo;
+	unsigned int len = 0;
+
+	rp = (struct relay_pack *)recv_buf;
+	if(rp->cmd == QUERY_CMD){ // 查询命令
+		save_mcpc_eu(rp->buf, rp->len - m_pack_head_len, rp->port_num)
+	}else if(rp->cmd == SET_CMD){  // 设置命令
+		
+	}
+}
+// 服务程序处理
+void server(int sockfd)
+{
+	int n;
+	struct sockaddr_in from_addr, to_addr;
+	socklen_t len = sizeof(struct sockaddr_in);
+	unsigned int ip;
+	unsigned char ip_buf[20];
+	struct relay_pack * p;
+	
+	while(1){
+		if (( n = recvfrom(sockfd, buf, BUFLEN, 0, (struct sockaddr * )&from_addr, &len)) < 0){
+			printf(" recv udprelay error: %s\r\n", strerror(errno));
+		}
+		printk(buf, n);
+		if(g_DevType == MAIN_UNIT){ // 主单元转发数据 
+			memcpy((unsigned char *)&to_addr, (unsigned char *)&from_addr, len);
+			p = (struct relay_pack *)buf;
+			ip = get_ip_by_topologic(p->topologic_num, p->port_num);
+			if(ip != 0){
+				to_addr.sin_family = AF_INET;
+				to_addr.sin_addr.s_addr = ip;
+				to_addr.sin_port = EU_RU_PORT;
+			}
+			sendto(sockfd, buf, n, 0, (struct sockaddr *)&to_addr, len);
+		}else if (g_DevType == EXPAND_UNIT){ // 扩展接收到远端的应答
+			eu_deal();      // 写入数据库
+		}else if (g_DevType == RAU_UNIT){ // 远端接收到查询信息
+			response_relay_ru();
+		}
+	}
+}
+// server init
+int initserver(int type, const struct sockaddr * addr, socklen_t alen, int qlen)
+{
+	int fd, err;
+	int reuse = 1;
+
+	if ((fd = socket(addr->sa_family, type, 0)) < 0)
+		return (-1);
+	if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(int)) < 0){
+		err = errno;
+		goto errout;
+	}
+	if (bind(fd, addr, alen) < 0) {
+		err = errno;
+		goto errout;
+	}
+	if (type == SOCK_STREAM || type == SOCK_SEQPACKET) {
+		if (listen(fd, qlen) < 0) {
+			err = errno;
+			goto errout;
+		}
+	}
+	return (fd);
+
+errout:
+	close(fd);
+	errno = err;
+	return (-1);
+}
+/*
+** 函数功能：udp转发
+** 输入参数：无
+** 输出参数：无
+** 返回值：无
+** 备注：
+*/
+void * udp_relay_pthread(void * arg)
+{
+	int sockfd;
+	struct sockaddr_in servaddr;
+	unsigned int ip;
+	int port = 0;
+
+	if(g_DevType == MAIN_UNIT){
+		port = AU_PORT;
+	}else{
+		port = EU_RU_PORT;
+	}
+	bzero(&servaddr, sizeof(servaddr));
+	servaddr.sin_family = AF_INET;
+	servaddr.sin_port = htons(port);
+	ip = GetSelfIp("eth0");
+	if(ip == 0 ){
+		printf("get eth0:1 ip error \r\n");
+	}
+	servaddr.sin_addr.s_addr = ip;
+	if ((sockfd = initserver(SOCK_DGRAM, (struct sockaddr *)&servaddr, sizeof(struct sockaddr), 0)) >= 0) {
+		server(sockfd);
+	}
+	return;
+}
+void * udp_read_pthread(void * arg)
+{
+	int read_idx = 0;
+	int write_idx = 0;
+	int port_cnt = 0;
+	unsigned char port[16];
+
+
+	while(1){
+		switch (m_relay_state) {
+			case UPDATE_TOPOLOGIC:  //  更新远端拓扑图
+				
+				break;
+			case QUERY_CMD:  // 轮寻远端设备参数
+				if((prot_cnt > 0)&&(read_idx < prot_cnt)){
+					pack_relay_send(QUERY_CMD, port[read_idx]);	
+					read_idx++;
+				}else{
+					m_relay_state = UPDATE_TOPOLOGIC;
+					read_idx = 0;
+				}
+				break;
+			case SET_CMD:  // 设置参数
+				if((prot_cnt > 0)&&(read_idx < prot_cnt)){
+					pack_relay_send(SET_CMD, port[write_idx]);	
+					write_idx++;
+				}else{
+					m_relay_state = UPDATE_TOPOLOGIC;
+					write_idx = 0;
+				}
+				break;
+			default:
+				m_relay_state = UPDATE_TOPOLOGIC;
+
+		}
+		sleep(1);
+	}
+}
+/*
+** 函数功能：创建创建udp转发线程
+** 输入参数：无
+** 输出参数：无
+** 返回值：无
+** 备注：
+*/
+int creat_udp_relay(void)
+{
+	pthread_t udp_relay_id;				// udp转发线程ID
+	
+	m_pack_head_len = PACK_HEAD_LEN;
+	m_read_para_cnt = READ_PARA_CNT;
+	m_write_para_cnt = WRITE_PARA_CNT;
+	// udp转发线程 
+	printf("create udp_relay_pthread.\r\n");
+	if( pthread_create(&udp_relay_id, NULL, udp_relay_pthread, NULL)){
+		printf("pthread_create udp_relay_pthread error.\r\n");
+		return -1;
+	}
+	// udp轮寻线程
+	printf("create udp_read_pthread.\r\n");
+	if( pthread_create(&udp_read_id, NULL, udp_read_pthread, NULL)){
+		printf("pthread_create udp_read_pthread error.\r\n");
+		return -1;
+	}
+	return 0;
+}

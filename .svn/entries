@@ -1,0 +1,187 @@
+10
+
+dir
+98
+svn://192.168.10.81/omc_au
+svn://192.168.10.81/omc_au
+
+
+
+2015-01-06T07:16:20.106817Z
+98
+zhuyanping
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+28c0466f-7c16-4a59-87b5-95a6b4cddd95
+
+dru_cm_gsm
+dir
+
+dru_tele_fdd
+dir
+
+dru_um_dcs
+dir
+
+tag.sh
+file
+
+
+
+
+2015-01-14T03:05:46.268715Z
+dd7a6d28adfade62bd4cedf19dd9f39d
+2014-04-09T02:02:06.987651Z
+1
+huyubin
+has-props
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+141
+
+boardinit.sh
+file
+
+
+
+
+2015-01-14T03:05:46.273716Z
+a697fd337a89c3cebefded10e0d500f8
+2014-04-09T02:02:06.987651Z
+1
+huyubin
+has-props
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+1340
+
+net
+dir
+
+fun
+dir
+
+common
+dir
+
+dru_cm_40m
+dir
+
+drv
+dir
+
+driver
+dir
+
+ppp
+dir
+
+protocol
+dir
+
+sqlite
+dir
+
+task
+dir
+
+dru_cm_dcs
+dir
+
+cgi
+dir
+
+init
+dir
+
+obj
+dir
+
+web
+dir
+
+makefile
+file
+
+
+
+
+2015-01-14T03:05:46.279216Z
+e312e2bd485b0372c500b0c4e2daecdd
+2014-04-09T02:02:06.987651Z
+1
+huyubin
+has-props
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+570
+
+peers
+dir
+

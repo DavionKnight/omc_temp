@@ -1,0 +1,240 @@
+/********************  COPYRIGHT(C) ***************************************
+**--------------文件信息--------------------------------------------------------
+**文   件   名: drudefstruct.h
+**创   建   人: 于宏图
+**创 建  日 期: 
+**程序开发环境：
+**描        述: 软件使用结构设置的头文件
+**--------------历史版本信息----------------------------------------------------
+** 创建人: 于宏图
+** 版  本: v1.0
+** 日　期: 
+** 描　述: 原始版本
+**--------------当前版本修订----------------------------------------------------
+** 修改人:
+** 版  本:
+** 日　期:
+** 描　述:
+**------------------------------------------------------------------------------
+**
+*******************************************************************************/
+#ifndef _DRUDEFSTRUCT_H
+#define _DRUDEFSTRUCT_H
+
+#include "usertype.h"
+#include <semaphore.h>
+
+#define COMBUF_SIZE  0x600
+
+#pragma pack(1)
+typedef struct ComBuf
+{
+  int   Fd;           	//通讯设备号
+	char  Buf[COMBUF_SIZE]; //接收数据缓存
+	int 	RecvLen;				//接收数据长度
+
+	int   Timer;        	//通讯设备计时
+	int   Status;       	//通讯设备状态
+	sem_t SemFlag;        //信号量标识
+}ComBuf_t, *ComBuf_tp;
+#pragma pack()
+
+typedef struct SelfThread
+{
+  pthread_t Tid;    //当前线程的线程ID    
+  int ThreadStatus; //线程的状态
+}SelfThread_t, *SelfThread_tp;
+
+typedef struct Pdu
+{
+  int   id;           //标识
+  char  mode[5];      //RO/RW模式
+  int   len;          //数据长度
+  char  var_type[10]; //uint1,uint2...数据类型
+  int   coefficient;  //系数
+  char  var[48];      //数据
+  char  name[100];    //参数名称
+  int	min;		  //最小值
+  int	max;          //最大值
+  int	pro;          //标识为是否为网管所需参量  1:网管所需参数  0：自定义参数
+}Pdu_t, *Pdu_tp;
+
+//通讯数据包头的定义
+#pragma pack(1)
+typedef struct APPackHead
+{
+  char   StartFlag;      //通讯起始标志
+  char   APType;         //AP层协议类型
+  char   VPType;         //VP承载协议类型
+  INT32U  StationNo;      //站点编号,200.200.200广播地址编号
+  char   DeviceNo;       //设备编号,0xFF作为广播地址编号
+  INT16U  PackNo;         //通讯包标识号
+  char   VPInteractFlag; //VP层交互标志
+  char   MCPFlag;        //MCP层协议标识
+  char   CommandFlag;    //命令标识
+  char   ResponseFlag;   //应答标志
+}APPackHead_t, *APPackHead_tp;
+
+//通讯数据包尾的定义
+typedef struct APPackTail
+{
+  INT16U  CRCData;    //CRC校验码
+  char   EndFlag;    //通讯包停止标志 
+}APPackTail_t, *APPackTail_tp;
+
+typedef struct APPack
+{
+  char   StartFlag;      //通讯起始标志
+  char   APType;         //AP层协议类型
+  char   VPType;         //VP承载协议类型
+  INT32U  StationNo;      //站点编号,200.200.200广播地址编号
+  char   DeviceNo;       //设备编号,0xFF作为广播地址编号
+  INT16U  PackNo;         //通讯包标识号
+  char   VPInteractFlag; //VP层交互标志
+  char   MCPFlag;        //MCP层协议标识
+  char   CommandFlag;    //命令标识
+  char   ResponseFlag;   //应答标志
+  
+  char PackValue[PACK_VALUE_SIZE];//数据单元数据
+  
+  INT16U CRCData;      //CRC校验码
+  char   EndFlag;      //通讯停止标志 
+
+  char   ComFlag;      //通讯标志:0接收,1发送 
+  char   ComBufOver;   //通讯缓冲区溢出标志
+  char   *PtrComWr;    //指向下一字符将被插入的位置
+  char   *PtrComRd;    //指向下一字符将被提取的位置
+  INT16U  ComCounter;   //通讯缓冲中字符数
+  INT16U  PackLen;      //通讯数据包长度
+}APPack_t, *APPack_tp;
+#pragma pack()
+
+// 本地网管调试和485模块调试，共用RS485串口时的交换缓冲区结构
+typedef struct SWAP_ST{
+	unsigned char buf[1024];
+	int len;
+}swap_t, *swap_tp;
+
+//设备信息定义
+typedef struct DevInfo
+{
+  INT32U  StationNo; //站点编号
+  char   DeviceNo;  //设备编号,0xFF作为广播地址编号
+  char   ModuleAddr;//模块地址
+  INT16U  ModuleType;//模块类型
+  INT16U  PduStart;
+}DevInfo_t, *DevInfo_tp;
+
+typedef struct DevicePara
+{
+int  ManufacturerID;            //0x0002  厂商代码 uint1型 
+int  DeviceClass;               //0x0003  设备类别 uint1型 
+char DeviceType[20];            //0x0004  设备型号,str型,最大长度20个字节,用来对设备型号进行简要描述 
+char SerialID[20];              //0x0005  设备生产序列号,str型,最大长度20个字节 
+int  CarrierNums;               //0x0006  设备的实际载波总数 uint1型 
+char Longitude[20];             //0x0007  设备经度 str型,最大长度20个字节(要求单位用°)如:东经103.12345678°则用"E103.12345678"表示
+char Latitude[20];              //0x0008  设备纬度 str型,最大长度20个字节(要求单位用°)如:北纬23.12345678°则用"N23.12345678"表示。
+char SWRunVer[20];              //0x000A  当前监控软件版本 str型,最大长度20个字节 
+int  ComModemType;              //0x000B  远程数据通信模块 uint1型
+int  SWRunMode;                 //0x0010  设备监控软件运行模式 uint1型 0:监控模式,1:软件升级模式,其它值为系统保留 
+int  APCMaxLen;                 //0x0011  AP:C协议最大长度 uint2型 
+int  MCPBExchangeMode;          //0x0012  MCP:B采用的交互机制 uint1型 0:表示采用每包确认方式。即:每收到一包都确认一次、连续发NC包后等待回应的机制, 1:表示采用多问一答方式。即:每收完NC包确认一次、连续发NC包后等待回应的机制, 其它值为系统保留
+int  ContinuumNum;              //0x0013  连发系数(NC)uint1型 
+int  RespondOvertime;           //0x0014  设备响应超时(TOT1)uint1型,单位为S
+int  SendIntervaltime;          //0x0015  发送间隔时间(TG)(此数据在NC＞1时才有意义) uint2型,单位为mS 
+int  PauseTime;                 //0x0016  暂停传输等待时间(TP) uint1型,单位为S
+int  SWUpdateOMCWaitTime;       //0x0017  转换到软件升级模式时,OMC需要等待的时间 uint2型,单位为S 当该值为0时,表示无需等待
+int  SWUpdateResult;            //0x0018  设备执行软件升级的结果 uint1型
+int  SWUpdateMode;              //0x0020  设备使用的远程升级方式 uint1型 0:表示设备无法进行远程升级。1:表示采用MCP:B方式。2:表示采用FTP方式。其它值为系统保留。
+char FPGAVer[20];               //0x0021  FPGA版本信息 str型,最大长度20个字节
+
+int  StationNo;                 //0x0101  站点编号 uint4型,仅供设置站点编号时使用
+char DeviceNo;                  //0x0102  设备编号 uint1型,仅供设置设备编号时使用。单机系统:固定为255 主站:固定为0 从站:1～254
+char SmscTel[20];               //0x0110  短信服务中心号码 str型,最大长度20个字节 
+char QueryTel[5][20];           //0x0111~0x0115 查询/设置电话号码1~5 str型,最大长度20个字节 
+char NotifyTel[20];             //0x0120  上报号码 str型,最大长度20个字节
+INT32U OmcIP;                   //0x0130  监控中心IP地址,4字节长整数型数
+int  OmcIPPort;                 //0x0131  监控中心IP地址端口号 uint2型
+char GprsAPN[20];               //0x0133  GPRS接入点名称(即:APN)str型,最大长度20个字节
+int  HeartBeatTime;             //0x0134  设备的心跳包间隔时间 uint2型,单位为秒钟 该值为0时,表示不发心跳。
+char GprsUser[20];              //0x0136  GPRS参数:用户标识 str型,最大长度20个字节
+char GprsPassword[20];          //0x0137  GPRS参数:口令 str型,最大长度20个字节
+int  PSTranProtocol;            //0x0138  PS域传输协议 uint1型,1:使用IP+UDP协议,2:使用IP+TCP协议
+int  DeviceIPPort;              //0x0139  设备接收端口(UDP协议) uint2型
+int  NotifyType;                //0x0141  上报类型 uint1型,明确上报的类型(在上报时,放在数据单元的最前边)
+int  DeviceCommType;            //0x0142  设备通信方式 uint1型,明确设备与OMC的通信方式1:短信方式查询、设置,短信方式上报；2:GPRS方式查询、设置,GPRS方式上报；其它值为系统保留
+char DeviceTime[7];             //0x0150  设备当前时间 数字串,由7个字节组成,用BCD码表示(年用4位,时间用24小时格式)
+INT32U DeviceIP;                //0x0151  设备IP地址数字串,4字节长整数型数
+INT32U DeviceNetmask;           //0x0152  设备子网掩码,4字节长整数型数
+INT32U DeviceGateway;           //0x0153  设备默认网关,4字节长整数型数
+
+INT32U FtpServerIP;             //0x0160  FTP服务器IP地址,4字节长整数型数
+int  FtpServerIPPort;           //0x0161  FTP服务器IP地址端口号 uint2型
+char FtpUser[20];               //0x0162  FTP升级操作的用户名 str型,最大长度20个字节
+char FtpPassword[20];           //0x0163  FTP升级操作的口令 str型,最大长度20个字节
+char SWFilePath[40];            //0x0164  相对路径 str型,最大长度40个字节
+char SWFileName[40];            //0x0165  文件名 str型,最大长度40个字节
+int  FtpTranCtrl;               //0x0166  FTP文件传输控制 uint1型
+
+int  BoxTemp;                   //0x05A6  机箱温度 sint1型,单位为℃
+char SampleJobStartTime[7];     //0x0601  批采开始时间 数字串,由7个字节组成,用BCD码表示(年用4位,时间用24小时格式)
+int  SampleJobTime;             //0x0602  批采时长 uint2型,单位为分钟
+int  SampleJobID;               //0x0603  批采对象 uint2型 
+int  SampleJobSwitch;           //0x0604  批采开关 uint1型 
+int  SampleJobStatus;           //0x0605  批采状态 uint1型 
+int  SampleJobDataLen;          //0x0607  批采数据每组长度 uint1型
+INT32U DevRoute;                //0x0873  设备路由登记地址 数字串,由4个字节组成
+}DevicePara_t, *DevicePara_tp;
+
+typedef struct SqlResult
+{
+	char  **dbResult;   //查出来的数据都保存在这里,它实际上是个1维数组(不要以为是2维数组),每一个元素都是一个 char * 值,是一个字段内容(用字符串来表示,以\0结尾)
+	int   nRow;         //查询出多少条记录(即查出多少行)
+	int   nColumn;      //多少个字段(多少列)
+	char  *errmsg;      //错误信息
+}SqlResult_t, *SqlResult_tp;
+
+#define MACSIZE       6 //MAC地址长度
+typedef struct ClientBuf
+{
+  int   Fd;           	//客户端socket描述符
+  int   DevNo;       		//设备编号,参照移动协议
+	char  Mac[MACSIZE];   //MAC地址
+	INT32U IPAddr;        //IP地址
+	int   DevType;        //设备类型,1主,2扩,3远
+	int   Status;       	//客户端连接状态
+	time_t LastComTime;   //客户端最后一次通讯时间  
+}ClientBuf_t, *ClientBuf_tp;
+
+//RRU向BBU发送UDP广播请求消息的格式
+#pragma pack(1)
+typedef struct UDPRequestMsg
+{
+char BBU_OptInterface;
+char RRU_ID;
+char RRU_Mac[MACSIZE];//MAC地址
+//自定义
+int DevNo;    //设备编号,参照移动协议
+INT32U IPAddr;//IP地址
+int DevType;  //设备类型,1主,2扩,3远
+}UDPRequestMsg_t, *UDPRequestMsg_tp;
+
+//BBU应答的消息格式
+typedef struct UDPAckMsg
+{
+char BBU_OptInterface;
+char RRU_ID;
+char BBU_ID;
+char RRU_Mac[MACSIZE];
+INT32U RRU_IP;
+INT32U BBU_IP;
+INT32U NetMask;
+//自定义
+int StationNo; //站点编号
+int DevNo;      //设备编号,参照移动协议
+}UDPAckMsg_t, *UDPAckMsg_tp;
+#pragma pack()
+
+#endif//_DRUDEFSTRUCT_H
+
+/*********************************End Of File*************************************/

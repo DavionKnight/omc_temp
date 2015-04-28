@@ -1,0 +1,1 @@
+cmd_/home/huyubin/dru_port6_main/drv/ksz8851mll/ks8851_mll.ko := arm-linux-ld -EL -r  -T /home/huyubin/linux-3.2.18/scripts/module-common.lds --build-id  -o /home/huyubin/dru_port6_main/drv/ksz8851mll/ks8851_mll.ko /home/huyubin/dru_port6_main/drv/ksz8851mll/ks8851_mll.o /home/huyubin/dru_port6_main/drv/ksz8851mll/ks8851_mll.mod.o

@@ -1,0 +1,760 @@
+#include "../../common/apue.h"
+#include "../../common/common.h"
+#include "../../common/list.h"
+#include "../../sqlite/drudatabase.h"
+#include "../../sqlite/sqliteops.h"
+#include "../../protocol/apcprotocol.h"
+#include "../../protocol/approtocol.h"
+#include "rs485_modules.h"
+#include "rs485.h"
+#include "uart_conf.h"
+
+#define RECORD_INDEX 0
+#define RECORD_LEN   1
+#define RECORD_ID    2
+#define RECORD_DATA  3
+
+// 模块信息结构体
+struct modules_st{
+	char name[64];
+	unsigned int addr;
+	unsigned int type;
+};
+// 模块信息链表结构体
+struct modules_list{
+	struct modules_st module;
+	struct list_head list;
+};
+// 1条记录结构体
+struct module_record{
+	int index;// 序号
+	int len; // 长度
+	int id;  // 参数标识
+	unsigned char data[64];// 参数内容
+};
+
+// 当前模块链表指针
+struct modules_list * cur_module;
+// 当前模块指针
+struct modules_st * p_module;
+// 模块链表头
+struct modules_list module_head;
+// 模块记录
+struct module_record para_record;
+
+char send_buf[1024];
+APPack_t send_pack;
+unsigned short int g_pack_no = 0x8000;
+
+
+extern int uart_fd;
+extern int rs485_recv_flag;
+//extern struct led_data led_sta_power[16];
+
+/*
+** 函数功能：查看数据库中，数据表是否存在
+** 输入参数：tb_name=数据表名称
+** 输出参数：无
+** 返回值：0=成功 其他=失败
+** 备注：
+*/
+int SqliteCheckTb(char * tb_name)
+{
+	int res;
+	char sql[256];
+	SqlResult_t sqlres;
+	int ret = 0;
+
+	sprintf(sql, "select * from sqlite_master where name=\'%s\';", tb_name);
+	res = SqliteSelect(sql, &sqlres);
+	if(res == SQLITE_OK){
+		if(sqlres.nRow == 0){
+			ret = -1;// 数据表不存在
+			goto EXIT_HANDLE;
+		}else{
+			ret = 0;
+			goto EXIT_HANDLE;
+		}
+	}
+	ret = -2;
+EXIT_HANDLE:
+	sqlite3_free_table(sqlres.dbResult);
+	return ret;
+}
+/*
+** 函数功能：读取数据表中的记录
+** 输入参数：tb_name=数据表名称, type=记录查询标示 id=标示内容 
+** 输出参数：record=记录内容
+** 返回值：0=成功 其他=失败
+** 备注：type: 0=按序号查询 1=按标示查询
+*/
+int SqliteReadRecord(char * tb_name, int type, int id, struct module_record * record)
+{
+	int res;
+	char sql[256];
+	SqlResult_t sqlres;
+	int ret = 0;
+
+	if(type == 1){	// 按标示查询
+		sprintf(sql, "select * from %s where id=%d;", tb_name, id);
+	}else if(type == 0){// 按序号查询
+		sprintf(sql, "select * from %s where idx=%d;", tb_name, id);
+	}else{// 其他默认按标示查询
+		sprintf(sql, "select * from %s where id=%d;", tb_name, id);
+	}
+	//printf("%s\r\n", sql);
+	res = SqliteSelect(sql, &sqlres);
+	if(res == SQLITE_OK){
+		if(sqlres.nRow == 0){
+			ret = -1;// 数据表不存在
+			goto EXIT_HANDLE;
+		}else if(sqlres.nRow == 1){
+			sscanf(sqlres.dbResult[sqlres.nColumn+RECORD_INDEX], "%d", &record->index);
+			sscanf(sqlres.dbResult[sqlres.nColumn+RECORD_LEN], "%d", &record->len);
+			sscanf(sqlres.dbResult[sqlres.nColumn+RECORD_ID], "%d", &record->id);
+			strcpy((char *)record->data, (char *)sqlres.dbResult[sqlres.nColumn+RECORD_DATA]);
+			ret = 0;
+			goto EXIT_HANDLE;
+		}else{
+			printf("数据库中相同标示的记录有多条.\r\n");
+			ret = -1; // 
+			goto EXIT_HANDLE;
+		}
+	}
+	ret = -2;
+EXIT_HANDLE:
+	sqlite3_free_table(sqlres.dbResult);
+	return ret;
+}
+/*
+** 函数功能：更新数据表中的记录
+** 输入参数：tb_name=数据表名称, type=记录查询标示 id=标示内容 record=记录内容
+** 输出参数：无
+** 返回值：0=成功 其他=失败
+** 备注：type: 0=按序号更新 1=按标示更新
+*/
+int SqliteUpdataRecord(char * tb_name, int type, int id, struct module_record * record)
+{
+	int res;
+	char sql[256];
+	unsigned char tbuf[128];
+	int cnt = 0;
+
+	memset(tbuf, 0, 128);
+	cnt = hex2ascii(record->data, record->len - 3, tbuf);
+	if(type == 1){	// 按标示查询
+		sprintf(sql, "update %s set value='%s' where id=%d;", tb_name, tbuf, id);
+	}else if(type == 0){// 按序号查询
+		sprintf(sql, "updata %s set value='%s' where idx=%d;", tb_name, tbuf, id);
+	}else{// 其他默认按标示查询
+		sprintf(sql, "updata %s set value='%s' where id=%d;", tb_name, tbuf, id);
+	}
+	printf("%s\r\n", sql);
+	res = SqliteUpdate(sql);
+	if(res == SQLITE_OK){
+		return 0;
+	}
+	printf("updata error!!!\r\n");
+	return -1;
+}
+/*
+** 函数功能：查看数据库中，记录总条数
+** 输入参数：tb_name=数据表名称
+** 输出参数：无
+** 返回值：大于等于0=成功 小于0=失败
+** 备注：
+*/
+int SqliteGetCnt(char * tb_name)
+{
+	int res;
+	char sql[256];
+	SqlResult_t sqlres;
+	int ret = 0;
+
+	sprintf(sql, "select count(*) from %s;", tb_name);
+	res = SqliteSelect(sql, &sqlres);
+	if(res == SQLITE_OK){
+		if(sqlres.nRow == 0){
+			ret = -1;// 数据表不存在
+			goto EXIT_HANDLE;
+		}else{
+			//printf("sqlres.dbResult=%s.\r\n", sqlres.dbResult[1]);
+			//ret = sqlres.dbResult[1];
+			sscanf(sqlres.dbResult[1], "%d", &ret);
+			goto EXIT_HANDLE;
+		}
+	}
+	ret = -2;
+EXIT_HANDLE:
+	sqlite3_free_table(sqlres.dbResult);
+	return ret;
+}
+/*
+** 函数功能：远端模块参数数据库初始化
+** 输入参数：config_name=配置文件名称
+** 输出参数：无
+** 返回值：1=成功 其他=失败
+** 备注：
+*/
+int ru_para_init(void)
+{
+	FILE * fp = NULL;
+	char * p = NULL;
+	char tbuf[256];
+	int ret;
+	char sql[256];
+	struct modules_list * p_list;
+	struct modules_st mod_tmp;
+	
+	// 初始化模块链表
+	INIT_LIST_HEAD(&module_head.list);
+	
+	// 打开远端模块配置文件
+	fp = fopen("/flashDev/program/config/mod_cfg.txt", "r");
+	if(fp == NULL){
+		printf("open file mod_cfg.txt error.\r\n");
+		return -1;
+	}
+	while(!feof(fp)){
+		// 文件格式为：gsm 88 0008
+		p = fgets(tbuf, sizeof(tbuf), fp);// 读取1行
+		if(p == NULL){
+			printf("read file error.\r\n");
+			return -2;
+		}
+		// 取出模块名称、模块地址和模块类型
+		ret = sscanf(tbuf,"%s %02x %04x", mod_tmp.name, &mod_tmp.addr, &mod_tmp.type);	
+		if((ret != 0) && (mod_tmp.addr != 0) && (mod_tmp.type != 0)){
+			printf("name=%s addr=0x%02x type=0x%04x\r\n", mod_tmp.name, mod_tmp.addr, mod_tmp.type);
+			if(0 != SqliteCheckTb(mod_tmp.name)){// 查看数据表是否存在
+				sprintf(sql, "create table %s(idx int, len int, id int, value text);", mod_tmp.name);
+				SqliteCreate(sql);// 创建该模块数据表
+			}else{
+				printf("%s is exist.\r\n", mod_tmp.name);
+			}
+			// 申请模块链表内存空间
+			p_list = (struct modules_list *)malloc(sizeof(struct modules_list));
+			if(p_list == NULL){
+				printf("malloc error.\r\n");
+				return -1;
+			}
+			// 给模块结构赋值
+			memset(p_list->module.name, 0, 64);
+			memcpy(p_list->module.name, mod_tmp.name, strlen(mod_tmp.name));	
+			p_list->module.addr = mod_tmp.addr;
+			p_list->module.type = mod_tmp.type;
+			// 将模块结构添加到模块链表中
+			list_add(&p_list->list, &module_head.list);	
+		}
+	}
+	fclose(fp);
+	return 0;
+}
+/*
+** 函数功能: 发送请求参量列表
+** 输入参数：无
+** 输出参数：无
+** 返回值：0=成功 其他=失败
+** 备注：
+*/
+int send_id_list(struct modules_st * module, int pack_no, int pack_all, int pack_idx)
+{
+	DevInfo_t dev;	
+	int len = 0;
+
+	dev.StationNo = 0;
+	dev.DeviceNo = 0;
+	dev.ModuleAddr = module->addr;
+	dev.ModuleType = module->type;
+	QueryIDPack(&dev, pack_no, pack_all, pack_idx, &send_pack);
+	len = APCPack(&send_pack, send_buf);
+	send_data(uart_fd, send_buf, len);
+	return 0;
+}
+/*
+** 函数功能: 刷新参量列表
+** 输入参数：无
+** 输出参数：无
+** 返回值：0=成功 其他=失败
+** 备注：
+*/
+int read_id_list(void)
+{
+	struct list_head * pos;
+	int cnt = 0;
+	struct modules_list * p;
+
+	list_for_each(pos, &module_head.list){
+		lock_sem(SEM_RS485_SEND);
+		rs485_recv_flag = 1;
+		p = list_entry(pos, struct modules_list, list);
+		cur_module = p;
+		send_id_list(&p->module,g_pack_no, 1, 1);
+		g_pack_no++;
+		cnt = 0;
+		while(rs485_recv_flag){
+			usleep(100000);
+			cnt++;
+			if(cnt > 30){
+				printf("read id not recv.\r\n");
+				break;
+			}
+		}
+		unlock_sem(SEM_RS485_SEND);
+	}
+	return 0;
+}
+
+/*
+** 函数功能: 设置远供电灯板
+** 输入参数：无
+** 输出参数：无
+** 返回值：0=成功 其他=失败
+** 备注：
+*/
+int set_led_power(void)
+{	
+	//struct list_head * pos;
+	//struct modules_list * p;
+	DevInfo_t dev;
+	int len = 0;
+	int dly_cnt;
+	
+	/*
+	list_for_each(pos, &module_head.list){// 遍历所有模块
+		p = list_entry(pos, struct modules_list, list);
+		if((p->module.addr == 0x63) && (p->module.type == 0x0200)){
+			break;
+		}
+		
+	}
+	*/
+	dev.StationNo = 0;
+	dev.DeviceNo = 0;
+	dev.ModuleAddr = 0x64;
+	dev.ModuleType = 0x0400;
+	
+	lock_sem(SEM_RS485_SEND);
+	//cur_module = p;
+	dly_cnt = 0;
+	rs485_recv_flag = 1;
+	led_para_pack_power(&dev, g_pack_no, &send_pack);
+	len = APCPack(&send_pack, send_buf);
+	send_data(uart_fd, send_buf, len);
+	//printf(">>>>>>>>>>>>>>>>>>>>>>>>>\n");
+	//printk(send_buf, len);
+	g_pack_no++;
+	while(rs485_recv_flag)
+	{
+		usleep(100000);
+		dly_cnt++;
+		if(dly_cnt > 30)
+		{
+			printf("set led_power not recv.\r\n");
+			rs485_recv_flag = 0;
+			break;
+		}
+	}
+	unlock_sem(SEM_RS485_SEND);
+
+	return 0;
+}
+
+/*
+** 函数功能: 设置灯板灯板
+** 输入参数：无
+** 输出参数：无
+** 返回值：0=成功 其他=失败
+** 备注：
+*/
+int set_led_led(void)
+{	
+	DevInfo_t dev;
+	int len = 0;
+	int dly_cnt;
+	
+	dev.StationNo = 0;
+	dev.DeviceNo = 0;
+	dev.ModuleAddr = 0x63;
+	dev.ModuleType = 0x0200;
+
+	lock_sem(SEM_RS485_SEND);
+	dly_cnt = 0;
+	rs485_recv_flag = 1;
+	led_para_pack_led(&dev, g_pack_no, &send_pack);	//组合包函数
+	len = APCPack(&send_pack, send_buf);
+	send_data(uart_fd, send_buf, len);
+	//printf(">>>>>>>>>>>>>>>>>>>>>>>>>\n");
+	//printk(send_buf, len);
+	g_pack_no++;
+	while(rs485_recv_flag)
+	{
+		usleep(100000);
+		dly_cnt++;
+		if(dly_cnt > 30)
+		{
+			printf("set led_led not recv.\r\n");
+			rs485_recv_flag = 0;
+			break;
+		}
+	}
+	unlock_sem(SEM_RS485_SEND);
+
+	return 0;
+}
+
+/*
+** 函数功能: 模块参数组包
+** 输入参数：无
+** 输出参数：无
+** 返回值：0=成功 其他=失败
+** 备注：
+*/
+int module_para_pack(DevInfo_t * p_devinfo, char * tb_name, int packno,
+			int start_idx, int idx_cnt, int cnt_all, APPack_t * p_packbuf)
+{
+	int pdustart, pvlen, i, j;
+	struct module_record record;
+	int ret;
+
+	// 按照协议组包头
+	pdustart = APHeadPack(p_devinfo,AP_C, COMMAND_QUERY, packno, p_packbuf);
+	if(pdustart < 0){
+		printf("module_para_pack error.\r\n");
+		return -1;
+	}
+	memset(&p_packbuf->PackValue[pdustart], 0, (sizeof(p_packbuf->PackValue)-pdustart));
+	pvlen = pdustart;
+	for(j = start_idx; (j < start_idx+idx_cnt)&&(j <= cnt_all); j++){
+		memset((char *)&record, 0, sizeof(struct module_record));
+		if((ret = SqliteReadRecord(tb_name, 0, j, &record)) != 0){
+			printf("read %s error, index=%d. error_no=%d.\r\n", tb_name, j, ret);
+			return -1;
+		}
+		p_packbuf->PackValue[pvlen++] = record.len;
+		p_packbuf->PackValue[pvlen++] = (unsigned char)record.id;
+		p_packbuf->PackValue[pvlen++] = (unsigned char)(record.id>>8);
+		for(i = 0; i < record.len-3; i++){
+			p_packbuf->PackValue[pvlen++] = 0;
+		}
+		if(pvlen > (APC_MSG_MAX_LEN-pdustart-AP_MSG_HEAD_TAIL_LEN)){
+			printf("module_para_pack len more than APC_MSG_MAX_LEN!\r\n");
+			break;
+		}
+	}
+	// 参数列表数据包长度
+	p_packbuf->PackLen = pvlen + AP_MSG_HEAD_TAIL_LEN;
+	return p_packbuf->PackLen;
+}
+
+/*
+** 函数功能: 查询所有模块的所有数据
+** 输入参数：无
+** 输出参数：无
+** 返回值：0=成功 其他=失败
+** 备注：
+*/
+int read_para_all(void)
+{
+	struct list_head * pos;
+	struct modules_list * p;
+	DevInfo_t dev;
+	int len = 0;
+	int cnt = 0;
+	int i = 0;
+	int cnt_all;
+	int dly_cnt;
+
+	list_for_each(pos, &module_head.list){// 遍历所有模块
+		p = list_entry(pos, struct modules_list, list);
+		cnt = SqliteGetCnt(p->module.name);
+		dev.StationNo = 0;
+		dev.DeviceNo = 0;
+		dev.ModuleAddr = p->module.addr;
+		dev.ModuleType = p->module.type;
+		i = 1;
+		cnt_all = cnt;
+		while(cnt > 0){
+			lock_sem(SEM_RS485_SEND);
+			dly_cnt = 0;
+			rs485_recv_flag = 1;
+			cur_module = p;
+			module_para_pack(&dev, cur_module->module.name, g_pack_no, i, 5, cnt_all, &send_pack);
+			len = APCPack(&send_pack, send_buf);
+			send_data(uart_fd, send_buf, len);
+			g_pack_no++;
+			i += 5;
+			cnt -= 5;
+			while(rs485_recv_flag){
+				usleep(100000);
+				dly_cnt++;
+				if(dly_cnt > 30){
+					printf("read para not recv.\r\n");
+					rs485_recv_flag = 0;
+					break;
+				}
+			}
+			unlock_sem(SEM_RS485_SEND);
+		}
+	}
+	return 0;
+}
+/*
+** 函数功能: 校验模块地址和类型
+** 输入参数：tb_name=数据表名称 len=数据长度(len,id和data总长度) id=数据ID data=数据内容
+** 输出参数：无
+** 返回值：0=成功 其他=失败
+** 备注：
+*/
+int check_module_type(unsigned char addr, unsigned short int type)
+{
+	struct modules_st * p = &cur_module->module;
+	if((p->addr == addr) && (p->type == type)){
+		return 0;
+	}
+	return 1;
+}
+/*
+** 函数功能: 将参数存入数据库
+** 输入参数：tb_name=数据表名称 len=数据长度(len,id和data总长度) id=数据ID data=数据内容
+** 输出参数：无
+** 返回值：0=成功 其他=失败
+** 备注：
+*/
+int write_para(int len, int id, unsigned char * data)
+{
+	struct module_record record;
+	int ret = 0;
+
+	if(id != 0x0009){// 非参量列表
+		memset((char *)&record, 0, sizeof(struct module_record));
+		if((ret = SqliteReadRecord(cur_module->module.name, 1, id, &record)) != 0){
+			printf("read %s error, id=%d. error_no=%d.\r\n", cur_module->module.name, id, ret);
+			return -1;
+		}
+		if((record.id == id)&&(record.len == len)){
+			memcpy(record.data, data, len-3);
+			SqliteUpdataRecord(cur_module->module.name, 1, id, &record);
+		}else{
+			printf("ID or LEN error.\r\n");
+			printf("id=%d, len=%d.\r\n", id, len);
+			printf("record.id=%d, record.len=%d.\r\n", record.id, record.len);
+		}
+	}
+
+	return 0;
+}
+/*
+** 函数功能: 将告警状态存入数据库
+** 输入参数：id=数据ID data=数据内容
+** 输出参数：无
+** 返回值：0=成功 其他=失败
+** 备注：
+*/
+int write_alarm(int id, unsigned char * data)
+{
+	int alarm_st = 0;
+	int ret = 0;
+	
+	//printf("alarm id=0x%04X, val=0x%02X\r\n", id, *data);
+	ret = DbGetThisIntPara(id, &alarm_st);
+	if(ret == 1){
+		alarm_st &= (~0x1);
+		alarm_st |= ((*data)&0x1);
+		if(-1 ==DbSaveThisIntPara(id, alarm_st)){
+			printf("DbSaveThisIntPara error!!!\r\n");
+		}
+	}else{
+		printf("read alarm id=0x%04X error!!!\r\n", id);
+		return -1;
+	}
+	return 0;
+}
+
+/*
+** 函数功能: 将1个ID的数据长度存入数据库
+** 输入参数：tb_name=数据表名称 id=参数ID 
+** 输出参数：无
+** 返回值：0=成功 其他=失败
+** 备注：
+*/
+int write_len_tbl(char * tb_name, unsigned short int id, unsigned char len)
+{
+	char sql[256];
+	int res = 0;
+	char tbuf[128];
+	int cnt = 0;
+	struct module_record record;
+
+	memset((char *)&record, 0, sizeof(struct module_record));
+	if(0 != SqliteReadRecord(tb_name, 1, id, &record)){
+		cnt = SqliteGetCnt(tb_name);
+		if(cnt < 0){
+			printf("get sqlite cnt error.\r\n");
+			return -1;
+		}
+		cnt++;
+		sprintf(tbuf, "(%d,%d,%d,'0');", cnt, len, id);
+		sprintf(sql, "INSERT INTO %s VALUES %s", tb_name, tbuf);
+		res = SqliteInsert(sql);//增加新参数
+		if(res != SQLITE_OK)
+		{
+			printf("%s. error.\r\n", sql);
+			return -1;
+		}
+	}else{
+		printf("0x%04X is exist in %s.\r\n", id, tb_name);
+	}
+	return 0;
+}
+/*
+** 函数功能: 将1个ID存入数据库
+** 输入参数：tb_name=数据表名称 id=参数ID 
+** 输出参数：无
+** 返回值：0=成功 其他=失败
+** 备注：
+*/
+int save_id_to_tbl(char * tb_name, unsigned short int id)
+{
+	char sql[256];
+	SqlResult_t sqlres;
+	char tbuf[128];
+	unsigned int len;
+
+	sprintf(tbuf, "\"0x%04X\"",id);
+	//在sqtbl数据表查找ID对应数据
+	sprintf(sql, "select * from %s where ID=%s;", RAU_TBL, tbuf);
+	if (SqliteSelect(sql, &sqlres) == SQLITE_OK)
+	{
+		if(sqlres.nRow > 0)
+		{
+			//printf("数据表中查到该数据.\r\n");
+			sscanf(sqlres.dbResult[sqlres.nColumn+5], "%d", &len);
+			write_len_tbl(tb_name, id, len);
+			sqlite3_free_table(sqlres.dbResult);//释放掉(sqlresult)sqlres.dbResult的内存空间
+		}
+		else//数据表中未查到该数据或有重复ID的数据
+		{
+			printf("数据表中未查到该数据或有重复ID的数据.\r\n");
+			sqlite3_free_table(sqlres.dbResult);//释放掉(sqlresult)sqlres.dbResult的内存空间
+			return -1;
+		}
+	}
+	else//数据查找出错
+	{
+		printf("数据查找出错.\r\n");
+		sqlite3_free_table(sqlres.dbResult);//释放掉(sqlresult)sqlres.dbResult的内存空间
+		return -2;
+	}
+	return 0;
+}
+/*
+** 函数功能: 查询参量长度
+** 输入参数：len=数据长度(len,id和data总长度) id=数据ID data=数据内容
+** 输出参数：buf=每个参量的长度
+** 返回值：0=成功 其他=失败
+** 备注：
+*/
+//int read_para_len(int len, int id, unsigned char * data, unsigned char * buf)
+int read_para_len(int id)
+{
+	FILE * fp = NULL;
+	char * p = NULL;
+	char tbuf[256];
+	int tmp_id;
+	int len;
+
+	//printf("open idlist.txt.\r\n");
+	// 打开总的参量配置文件
+	fp = fopen("/flashDev/program/config/idlist.txt", "r");
+	if(fp == NULL){
+		printf("open file idlist.txt error.\r\n");
+		return -1;
+	}
+	p = fgets(tbuf, sizeof(tbuf), fp); // read one line
+	while(!feof(fp)){
+		// 文件格式为(ID,name,mode,var_type,coefficient,len,V0);	
+		// ("0x0002","设备厂商代码","RO","uint1",1,1,0);
+		p = fgets(tbuf, sizeof(tbuf), fp); // read one line
+		if(p == NULL){
+		//	printf("read file idlist.txt error.\r\n");
+			return -2;
+		}
+		sscanf(tbuf, "(\"0x%04X\",%*[^,],%*[^,],%*[^,],%*[^,],%d,",&tmp_id, &len);
+		//printf("id=0x%04X len=%d.\r\n", tmp_id, len);
+		if(id == tmp_id){
+			break;
+		}else{
+			tmp_id = 0;
+			len = 0;
+		}
+	}
+	fclose(fp);
+	return len;
+}
+/*
+** 函数功能: 将参量列表存入数据库
+** 输入参数：tb_name=数据表名称 len=数据长度(len,id和data总长度) id=数据ID data=数据内容
+** 输出参数：无
+** 返回值：0=成功 其他=失败
+** 备注：
+*/
+int write_id_list(int len, int id, unsigned char * data)
+{
+	unsigned short int type = 0;
+	unsigned char * p = data;
+	int para_len = 0;
+
+	if(id == 0x0009){// 参量列表
+		len -= 3;
+		while(len){
+			type = hex2uint16(p);
+			if(type != 0){
+				para_len = read_para_len(type);		
+				if(para_len > 0){
+					write_len_tbl(cur_module->module.name, type, para_len+3);
+				}else{
+					printf("not find id=0x%04X in idlist.txt!!!\r\n", type);
+				}
+			}
+			p += 2;
+			len -= 2;
+		}	
+	}
+	return 0;
+}
+/*
+** 函数功能: 数据转义，发送
+** 输入参数：tb_name=数据表名称 len=数据长度(len,id和data总长度) id=数据ID data=数据内容
+** 输出参数：无
+** 返回值：0=成功 其他=失败
+** 备注：
+*/
+int data_change(unsigned char * buf, int len)
+{
+	int sum, rd, wr, cnt;
+
+	sum = APCEscSum((char *)(buf+1), (unsigned short)(len-2));
+	cnt = sum;
+	if(sum > 0){
+		rd = len-1;
+		wr = rd + sum;
+		buf[wr--] = buf[rd--];
+		while(rd > 0){
+			if((buf[rd] == APC_ESC0X5E)
+					|| (buf[rd] == APC_ESC0X7E)){
+				buf[wr--] = (buf[rd] & 0xf0) + 0x0D;
+				buf[wr] = APC_ESCFLAG;
+				sum--;
+				if(sum == 0){
+					break;
+				}
+			}else{
+				buf[wr] = buf[rd];
+			}
+			wr--;
+			rd--;
+		}
+	}
+	return (len+cnt);
+}

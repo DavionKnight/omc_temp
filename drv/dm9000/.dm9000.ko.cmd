@@ -1,0 +1,1 @@
+cmd_/home/huyubin/dru_port6_main/drv/dm9000/dm9000.ko := arm-linux-ld -EL -r  -T /home/huyubin/linux-3.2.18/scripts/module-common.lds --build-id  -o /home/huyubin/dru_port6_main/drv/dm9000/dm9000.ko /home/huyubin/dru_port6_main/drv/dm9000/dm9000.o /home/huyubin/dru_port6_main/drv/dm9000/dm9000.mod.o
