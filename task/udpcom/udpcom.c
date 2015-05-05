@@ -463,8 +463,8 @@ UDPAckMsg_t ackmsg;
   while(1)
   {
     sleep(1);
-    p_combuf->Timer = (int)(time(NULL) - starttime);
     p_combuf = &g_UDPCom;
+    p_combuf->Timer = (int)(time(NULL) - starttime);
     pdevinfo = &DevInfo;
 
     if (p_combuf->Status == NET_DISCONNET)
