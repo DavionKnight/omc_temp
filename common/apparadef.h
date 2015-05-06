@@ -403,6 +403,8 @@
 #define POWER_SW7_ID		  0x008006AE  // 远供电开关7
 #define POWER_SW8_ID		  0x008006AF  // 远供电开关8
 
+#define GSM_ATTENUATION		  0x00800FF0  //GSM下行衰减
+
 #define AUTHOR_ID			  0x00800FFF  // 操作权限
 #endif  //_APPARADEF_H
 

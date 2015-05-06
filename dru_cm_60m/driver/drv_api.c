@@ -260,6 +260,12 @@ DevInfo_t devinfo;
     //载波频点设置
     if (g_DevType == MAIN_UNIT)
     {
+//    	if(DbGetThisIntPara(GSM_ATTENUATION,&val) == 1)
+//    	{
+//
+//    	}
+
+
 		// 自动时延校正开关
 		if(get_net_group() == 0x331){
 			DbGetThisIntPara(CDMA_AUTO_DELAY_SW_ID, &val1);
@@ -276,32 +282,37 @@ DevInfo_t devinfo;
 		}else{
 			set_auto_delay_sw(0);
 		}
+		printf("dru_dev_p->dev_att is %d===================================================\n",dru_dev_p->dev_att);
+		if (DbGetThisIntPara(GSMULATT_ID, &val) == 1)
+		ss112_gsm_config(val*2+30);
 		if(dru_dev_p->dev_att==DEV_SS1112_TDD){
 			//LTE1上行数控衰减
-			if (DbGetThisIntPara(LTE1ULATT_ID, &val) == 1);
+			if (DbGetThisIntPara(LTE1ULATT_ID, &val) == 1)
 			ss112_lte1_config(val*2);
 			//LTE2上行数控衰减
-			if (DbGetThisIntPara(LTE2ULATT_ID, &val) == 1);
+			if (DbGetThisIntPara(LTE2ULATT_ID, &val) == 1)
 			ss112_lte2_config(val*2);
 			//TD上行数控衰减
-			if (DbGetThisIntPara(G3ULATT_ID, &val) == 1);
+			if (DbGetThisIntPara(G3ULATT_ID, &val) == 1)
 			ss112_td_config(val*2);
 			//GSM上行数控衰减
-			if (DbGetThisIntPara(GSMULATT_ID, &val) == 1);
-			ss112_gsm_config(val*2);
+			if (DbGetThisIntPara(GSMULATT_ID, &val) == 1)
+			ss112_gsm_config(val*2+30);
+			printf("1val is %d===================================================\n",val);
 		}else if(dru_dev_p->dev_att==DEV_SS1112_FDD){
 			//LTE1上行数控衰减
-			if (DbGetThisIntPara(FDD1ULATT_ID, &val) == 1);
+			if (DbGetThisIntPara(FDD1ULATT_ID, &val) == 1)
 			ss112_lte1_config(val*2);
 			//LTE2上行数控衰减
-			if (DbGetThisIntPara(FDD2ULATT_ID, &val) == 1);
+			if (DbGetThisIntPara(FDD2ULATT_ID, &val) == 1)
 			ss112_lte2_config(val*2);
 			//TD上行数控衰减
-			if (DbGetThisIntPara(G3ULATT_ID, &val) == 1);
+			if (DbGetThisIntPara(G3ULATT_ID, &val) == 1)
 			ss112_td_config(val*2);
 			//GSM上行数控衰减
-			if (DbGetThisIntPara(GSMULATT_ID, &val) == 1);
-			ss112_gsm_config(val*2);
+			if (DbGetThisIntPara(GSMULATT_ID, &val) == 1)
+			ss112_gsm_config(val*2+30);
+			printf("2val is %d===================================================\n",val);
 		}
 		if(get_net_group() != 0x331){
 			// LTE 时隙自动配置
@@ -730,6 +741,7 @@ unsigned short read_pw(void)
 	//printf("pw = 0x%04x\n", para);
 	return para;
 }
+#if 0
 // 写入信道号
 int write_channel(int num)
 {	
@@ -879,6 +891,199 @@ void * auto_channel_pthread(void * arg)
 	}
 	return (void *)0;
 }
+#else
+// 写入信道号
+int write_channel(int num)
+{
+	int val = 0;
+
+	if(num < 96)	// china mobile gsm
+	{
+		val = ((93500+20*num)-94400)/4;
+	}
+	else if((num >= 512) && (num <= 661))	//china mobile DCS
+	{
+		val = ((180500+20*(num-511))-181760)/4;
+	}
+
+	if (val < 0)
+	{
+		val = val*(-1);
+		val = 768 - val;
+	}
+	//配置DDC
+	drv_write_ddc(11, (768-val));	//40m使用第12信道做为测试通道
+	//配置DUC
+	drv_write_duc(11, val);
+	return 0;
+}
+void * auto_channel_pthread(void * arg)
+{
+	unsigned short temp = 0;
+	unsigned short temp_px[128];
+	int number;
+	int channel_fw;
+	int channel_num = 0;
+	int channel_buf[16];
+	int idx;
+	int i = 0;
+	int val = 0;
+	unsigned short para1 = 0;
+	int start_num = 0;
+	int end_num = 0;
+	time_t start_time = 0;
+	time_t stop_time = 0;
+
+	if(get_net_type() == 1)	// 1:GSM 2:DCS
+	{
+		start_num = 1021;
+		end_num = 95;
+		channel_fw = 100;
+	}
+	else
+	{
+		start_num = 512;
+		end_num = 636;
+		channel_fw = 125;
+	}
+
+	number = 0;
+	channel_num = start_num;
+
+	memset(channel_buf, 0, 64);
+	memset(temp_px, 0, 256);
+	while(1)
+	{
+		DbGetThisIntPara(AUTO_CHANNEL_SW_ID, &val);
+		if(val&0x1 == 1)			//自动载波跟踪开关打开
+		{
+			stop_time = start_time = time(NULL);
+			while((stop_time-start_time) < 300)
+			{
+				stop_time = time(NULL);
+				drv_read_fpga(GSMCARRIERMASK_ADDR, &para1);
+				para1 &= ~(1<<11);	//40m时使用第12信道作为测试信道
+				drv_write_fpga(GSMCARRIERMASK_ADDR, para1);
+
+				//写入信道号
+				write_channel(channel_num);	//写入信道号
+				temp = read_pw();			//读取功率值
+				printf("channel_num = %d, pw = 0x%04x.\n", channel_num, temp);
+
+				if(temp>temp_px[number])
+					temp_px[number] = temp;
+
+				number++;
+				channel_num++;
+				if(get_net_type() == 1)	// 1:GSM 2:DCS
+				{
+					if(channel_num>95)
+					{
+						if(channel_num<1021)
+						{
+							channel_num = start_num;
+							number = 0;
+						}
+						else if(channel_num>1024)
+						{
+							channel_num = 0;
+						}
+					}
+				}
+				else
+				{
+					if(channel_num > end_num)
+					{
+						channel_num = start_num;
+						number = 0;
+					}
+				}
+			}
+
+			idx = 0;
+
+			if((temp_px[0]>0x200)&&(temp_px[0]>temp_px[1]))
+			{
+				channel_buf[idx] = 0;
+				idx++;
+			}
+
+			for(i=0;i<channel_fw-2;i++)
+			{
+				printf("channel power %d", i);
+				printf(" =  %d\n", temp_px[i]);
+				if((temp_px[i]>0x300)&&(temp_px[i+1]>temp_px[i])&&(temp_px[i+1]>temp_px[i+2]))
+				{
+					if(idx<16)
+					{
+						channel_buf[idx] = i+1;
+						idx++;
+					}
+				}
+			}
+
+			if((temp_px[channel_fw-1]>0x200)&&(temp_px[channel_fw-1]>temp_px[channel_fw-2]))
+			{
+				channel_buf[idx] = channel_fw-1;
+				idx++;
+			}
+
+			for(i=0;i<idx;i++)
+			{
+				if(get_net_type() == 1)	// 1:GSM 2:DCS
+				{
+					if(channel_buf[i]<4)
+						channel_buf[i] += 1021;
+					else
+						channel_buf[i] -= 4;
+				}
+				else
+				{
+					channel_buf[i] =channel_buf[i] + start_num;
+				}
+			}
+
+			printf("valid channel num is %d\n", idx);
+			for(i=0;i<16;i++)
+			{
+				if(i < idx)
+				{
+					DbGetThisIntPara(WORKINGCHANNELNO_ID+i, &val);
+					if(val != channel_buf[i])
+					{
+						DbSaveThisIntPara_MCP_C(WORKINGCHANNELNO_ID+i, channel_buf[i], 0);
+						DbSaveThisIntPara_MCP_C(WORKINGCHANNEL_SW_ID+i, 1, 0);
+					}
+				}
+				else
+				{
+					DbGetThisIntPara(WORKINGCHANNELNO_ID+i, &val);
+					if(val != 0)
+					{
+						DbSaveThisIntPara_MCP_C(WORKINGCHANNELNO_ID+i, 0, 0);
+						DbSaveThisIntPara_MCP_C(WORKINGCHANNEL_SW_ID+i, 0, 0);
+					}
+				}
+			}
+			DbSaveThisIntPara(AUTO_CHANNEL_SW_ID, 0);	//关闭自动载波跟踪开关
+			g_OMCSetParaFlag = 1;
+			g_OmcBroadcastFlag = 1;
+			memset(channel_buf, 0, 64);
+			memset(temp_px, 0, 256);
+			sleep(10);
+		}
+		else
+		{
+			sleep(10);
+		}
+	}
+	return (void *)0;
+}
+#endif
+
+
+
+
 // 自动载波跟踪线程
 int creat_auto_channel(void)
 {
