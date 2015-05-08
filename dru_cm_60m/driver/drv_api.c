@@ -217,12 +217,32 @@ DevInfo_t devinfo;
     {
       OMCWriteFpga(LTE2VGA_ADDR, val);
     }
-    
+#if 0
     if (GetDataGainVal(GSMDATAGAIN_ID, &val) == 1)//GSM 数字增益设置
     {
-      val = (INT16U)(pow(10.0, (double)val/200) * 8192 + 0.5);
+    	printf("come in GSM\n");
+    	if(DbGetThisIntPara(GSM_ATTENUATION,&val1) == 1)
+		{
+    		printf("val1 is %d\n",val1);
+    		if(1 == val1)
+    		{
+//    			DbGetThisIntPara(GSMDLPOWER_ID,&val2);
+    			drv_read_fpga(GSMDATAPOWER_ADDR, &val2);
+    			printf("val2 is %d\n\n\n",val2);
+    			if(val2>30)
+    			val = (INT16U)(pow(10.0, (double)(val-300)/200) * 8192 + 0.5);
+    		}
+    		else
+    			val = (INT16U)(pow(10.0, (double)(val)/200) * 8192 + 0.5);
+		}
+    	else
+    	{
+    		val = (INT16U)(pow(10.0, (double)(val)/200) * 8192 + 0.5);
+    	}
+
       OMCWriteFpga(GSMDATAGAIN_ADDR, val);
     }
+#endif
     if (GetDataGainVal(G3DATAGAIN_ID, &val) == 1)//3G 数字增益设置
     {
       val = (INT16U)(pow(10.0, (double)val/200) * 8192 + 0.5);
@@ -282,9 +302,6 @@ DevInfo_t devinfo;
 		}else{
 			set_auto_delay_sw(0);
 		}
-		printf("dru_dev_p->dev_att is %d===================================================\n",dru_dev_p->dev_att);
-		if (DbGetThisIntPara(GSMULATT_ID, &val) == 1)
-		ss112_gsm_config(val*2+30);
 		if(dru_dev_p->dev_att==DEV_SS1112_TDD){
 			//LTE1上行数控衰减
 			if (DbGetThisIntPara(LTE1ULATT_ID, &val) == 1)
@@ -298,7 +315,6 @@ DevInfo_t devinfo;
 			//GSM上行数控衰减
 			if (DbGetThisIntPara(GSMULATT_ID, &val) == 1)
 			ss112_gsm_config(val*2+30);
-			printf("1val is %d===================================================\n",val);
 		}else if(dru_dev_p->dev_att==DEV_SS1112_FDD){
 			//LTE1上行数控衰减
 			if (DbGetThisIntPara(FDD1ULATT_ID, &val) == 1)
@@ -312,7 +328,6 @@ DevInfo_t devinfo;
 			//GSM上行数控衰减
 			if (DbGetThisIntPara(GSMULATT_ID, &val) == 1)
 			ss112_gsm_config(val*2+30);
-			printf("2val is %d===================================================\n",val);
 		}
 		if(get_net_group() != 0x331){
 			// LTE 时隙自动配置
@@ -1074,8 +1089,31 @@ void * auto_channel_pthread(void * arg)
 		}
 		else
 		{
-			sleep(10);
+			sleep(1);
 		}
+		//add gsm att -30db here
+		int vala,valb,val1,val2;
+	    if (GetDataGainVal(GSMDATAGAIN_ID, &vala) == 1)//GSM 数字增益设置
+	    {
+	    	printf("come in GSM vala is %d\n",vala);
+	    	valb = (INT16U)(pow(10.0, (double)(vala)/200) * 8192 + 0.5);
+	    	if(DbGetThisIntPara(GSM_ATTENUATION,&val1) == 1)
+			{
+	    		printf("val1 is %d\n",val1);
+	    		if(1 == val1)
+	    		{
+	//    			DbGetThisIntPara(GSMDLPOWER_ID,&val2);
+	    			drv_read_fpga(GSMDATAPOWER_ADDR, &val2);
+	    			printf("val2 is %d\n\n\n",val2);
+	    			if(val2>30)
+	    				valb = (INT16U)(pow(10.0, (double)(vala-300)/200) * 8192 + 0.5);
+	    		}
+			}
+
+	      OMCWriteFpga(GSMDATAGAIN_ADDR, valb);
+	    }
+
+
 	}
 	return (void *)0;
 }

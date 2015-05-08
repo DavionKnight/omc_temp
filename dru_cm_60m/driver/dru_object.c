@@ -29,9 +29,9 @@
 #include "dru_lmx2581.h"
 
 //const char * g_ver = "CM-DCS-0004.0";
-const char * g_type_ver = "MD"; 
-const char * g_drv_ver = "03";
-const char * g_test_ver = "6"; // 0:正式版 奇数：待测试版 偶数：已测试版本
+const char * g_type_ver = "MDG";
+const char * g_drv_ver = "16";
+const char * g_test_ver = "1"; // 0:正式版 奇数：待测试版 偶数：已测试版本
 extern const char * g_comm_ver;
 extern const char * g_comm_test_ver;
 void dru_init(void)
